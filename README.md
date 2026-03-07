@@ -1,69 +1,80 @@
-# Properties of fairness measures in the context of varying class imbalance and protected group ratios
+# Fairness Measures Explorer
 
----
+A modular Streamlit recreation of the provided fairness-measure repository.
 
-# Reproducibility
+The app covers two workflows:
 
-## Environment
+1. **Synthetic study**
+   - generate the space of 8-cell confusion matrices exactly for moderate `n`
+   - or sample uniformly from that space with Monte Carlo draws
+   - compute any registered fairness metric
+   - reproduce the paper-style histogram grids, perfect-fairness curves, undefined-value curves, and fairness-vs-performance heatmaps
 
-The experiments were conducted on a machine equipped with Intel® Core™ i7-1260P 4.7GHz processor
-and 48 GB of RAM, using Python 3.10.10, on Ubuntu 22.04.
+2. **Adult case study**
+   - load `adult.data`
+   - resample subsets with controlled group ratio (GR) and imbalance ratio (IR)
+   - run the same family of classifiers as in the original repository
+   - reproduce the case-study line plots, absolute-value plots, NaN plots, grouped bars, and aggregated tables
 
-The required packages, with specified versions, are listed in `requirements.txt`
-and can be installed using `pip install -r requirements.txt`.
+## Project layout
 
-## Repository contents
+- `app.py` - Streamlit UI
+- `metric_registry.py` - registry and helpers for metrics
+- `builtin_metrics.py` - built-in fairness, ratio, and performance metrics
+- `custom_metrics.py` - edit this to add your own metrics
+- `synthetic_data.py` - exact and sampled confusion-matrix generation
+- `synthetic_analysis.py` - perfect-fairness / NaN / heatmap helpers
+- `adult_case_study.py` - Adult dataset loading, preprocessing, resampling, and evaluation
+- `plots.py` - Matplotlib plot builders used by the app
+- `requirements.txt` - Python dependencies
 
-In the repository, there are .py scripts for reproducing all the experiments from the paper.
+## Install
 
-All the same code is also available in the form of Jupyter notebooks, in the `notebooks/` directory,
-to allow interactive execution.
-
-### Experiments with synthetic data (Sections 3 and 4 of the paper)
-
-- `sets_creation.py`: generation of synthetic data, consisting of all possible confusion matrices with regard to
-    the protected groups and decision classes.
-- `metrics_calculations`: calculation of fairness measures for synthetic data
-- `histograms_plot`: distribution of fairness measures
-- `perfect_fairness_and_undefined`: probability of perfect fairness and undefined values of metrics
-
-### Experiments with real-world data (Section 5)
-
-- `case_study.py`: all the code for the case study with the Adult dataset
-
-## Code execution
-
-### Synthetic data experiments
-
-For the experiments with synthetic data, `sets_creation.py` and `metrics_calculations.[py|ipynb]` need to be run first
-(in this specific order). The remaining scripts can be run in any order.
-
-In the paper, we used a dataset of all possible confusion matrices of `n=56` samples. However,
-the calculations take a long time and lots of RAM. For a quick check, we recommend using `n=24`. This will also
-require to adjust the variable denoting the number of samples `sample_size` in `metrics_calculations`,
-`histograms_plot` and `perfect_fairness_and_undefined`.
-
-The data generation script requires two arguments:
-the first should be `8` and the second one is the number of samples.
-```
-python sets_creation.py 8 56    # or 24, to speed up the execution
+```bash
+pip install -r requirements.txt
 ```
 
-Other files don't take any arguments and can be run as follows:
-```
-python metrics_calculations.py
-python histograms_plot.py
-python perfect_fairness_and_undefined.py
-```
-They will save the results in the `out/` directory (and create it if necessary).
+## Run
 
-### Real-world data experiments
-
-The experiments with real-world data can be found in `case_study.py`.
-It uses data in `data/adult.data`, which originates from the
-[UCI repository](https://archive.ics.uci.edu/ml/machine-learning-databases/adult/).
-
-This can be run as follows:
+```bash
+streamlit run app.py
 ```
-python case_study.py
+
+## Adding a new metric
+
+1. Open `custom_metrics.py`.
+2. Copy the example metric skeleton.
+3. Change the formula and metadata.
+4. Save the file and reload Streamlit.
+
+Custom metrics automatically appear in the Streamlit dropdowns if they are registered with:
+
+```python
+register_metric(MetricSpec(...))
 ```
+
+## Notes on reproducibility
+
+- The metric formulas follow the **repository implementation** sign convention: built-in fairness differences are computed as `j - i`.
+- In the synthetic workflow, exact enumeration is practical only for moderate totals. The paper-scale case `n=56` contains **553,270,671** confusion matrices, so the app defaults to smaller exact runs or Monte Carlo sampling.
+- The Adult case-study page includes a compatibility toggle for the ordered-education encoding. When enabled, it reproduces the broadcast behavior present in the provided script; when disabled, it uses the corrected per-row ordered encoding.
+- The Adult dataset is **not bundled**. Either upload `adult.data` through the app or point the app to a local path such as `data/adult.data`.
+
+## Suggested workflow
+
+### Synthetic study
+
+1. Start with exact enumeration for `n=24`.
+2. Select one or more fairness metrics.
+3. Inspect histogram grids for selected GR/IR panels.
+4. Inspect perfect-fairness and undefined-value curves.
+5. Compare fairness against `Accuracy` or `G-mean` with the heatmap.
+6. Edit `custom_metrics.py` and repeat.
+
+### Adult case study
+
+1. Upload `adult.data`.
+2. Keep the paper sweep ratios, or reduce them for quicker runs.
+3. Choose a subset of classifiers if you want faster feedback.
+4. Inspect mean/std or mean/SEM fairness bands.
+5. Export raw CSV results for later analysis.
