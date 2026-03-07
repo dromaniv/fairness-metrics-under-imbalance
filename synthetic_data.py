@@ -15,7 +15,7 @@ from builtin_metrics import accuracy, g_mean, group_ratio_i, group_ratio_j, imba
 from metric_registry import COUNT_COLUMNS, compute_metrics
 
 
-DEFAULT_MAX_EXACT_ROWS = 3_000_000
+DEFAULT_MAX_EXACT_ROWS = 20_000_000
 
 
 def count_confusion_matrices(total: int, parts: int = 8) -> int:

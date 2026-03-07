@@ -27,9 +27,12 @@ STYLE_OVERRIDES = {
     "Accuracy Equality Difference": {"color": "#6699CC", "marker": "*"},
     "Statistical Parity Difference": {"color": "#994455", "marker": "."},
     "Equal Opportunity Difference": {"color": "#004488", "marker": "v"},
+    "Equalized Odds Difference": {"color": "#117733", "marker": "^"},
     "Predictive Equality Difference": {"color": "#997700", "marker": "x"},
     "Negative Predictive Parity Difference": {"color": "#EECC66", "marker": "+"},
     "Positive Predictive Parity Difference": {"color": "#EE99AA", "marker": "o"},
+    "Conditional Q Association": {"color": "#AA3377", "marker": "D"},
+    "Phi Fair": {"color": "#BBBBBB", "marker": "s"},
 }
 
 

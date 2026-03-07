@@ -84,7 +84,7 @@ def probability_of_perfect_fairness(
                 row[key] = np.nan
             else:
                 if epsilon == 0:
-                    row[key] = float((values == 0).sum() / len(values))
+                    row[key] = float(np.isclose(values.to_numpy(dtype=np.float64), 0.0, atol=1e-9, rtol=0).sum() / len(values))
                 else:
                     row[key] = float((values.abs() < epsilon).sum() / len(values))
         rows.append(row)

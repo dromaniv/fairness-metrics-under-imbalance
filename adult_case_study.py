@@ -309,6 +309,7 @@ def evaluate_case_study(
     positive_label: str = ">50K",
     random_state: int = 2137,
     repo_compatibility_education_bug: bool = False,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run the controlled Adult case study.
 
@@ -327,13 +328,19 @@ def evaluate_case_study(
     if fairness_metric_keys is None:
         raise ValueError("At least one fairness metric key must be supplied.")
 
+    classifier_names = list(classifier_names)
+    fairness_metric_keys = list(fairness_metric_keys)
+
     ratios = [(fixed_ratio, float(ir)) for ir in ratio_values] + [(float(gr), fixed_ratio) for gr in ratio_values]
     holdout = ShuffleSplit(n_splits=holdout_splits, test_size=test_size, random_state=random_state)
 
     fairness_rows: list[list[object]] = []
     performance_rows: list[list[object]] = []
 
-    for gr, ir in ratios:
+    total_steps = len(ratios)
+    for step_idx, (gr, ir) in enumerate(ratios):
+        if progress_callback is not None:
+            progress_callback(step_idx / total_steps, f"GR={gr:.2f} IR={ir:.2f}  ({step_idx + 1}/{total_steps})")
         subset = sample_adult_subset(
             adult_df,
             sample_size=sample_size,
@@ -384,6 +391,8 @@ def evaluate_case_study(
 
     fairness_results = pd.DataFrame(fairness_rows, columns=["gr", "ir", "clf", "metric", "value"])
     performance_results = pd.DataFrame(performance_rows, columns=["gr", "ir", "clf", "metric", "value"])
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
     return fairness_results, performance_results
 
 
