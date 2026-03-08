@@ -213,13 +213,8 @@ def preprocess_adult(
     *,
     target_col: str = "income",
     protected_col: str = "sex",
-    repo_compatibility_education_bug: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Encode the Adult dataset similarly to the original script.
-
-    If ``repo_compatibility_education_bug`` is True, the ordered-education
-    encoding reproduces a broadcasting bug present in the provided script.
-    """
+    """Encode the Adult dataset for classifier training."""
 
     feature_columns = [column for column in dataset.columns if column != target_col and column != "fnlwgt"]
     X_all = dataset[feature_columns].copy()
@@ -239,11 +234,7 @@ def preprocess_adult(
             handle_unknown="use_encoded_value",
             unknown_value=np.nan,
         )
-        education_values = education_encoder.fit_transform(X_all[["education"]]).reshape(-1)
-        if repo_compatibility_education_bug:
-            X_categorical[:, education_idx] = education_values[0]
-        else:
-            X_categorical[:, education_idx] = education_values
+        X_categorical[:, education_idx] = education_encoder.fit_transform(X_all[["education"]]).reshape(-1)
 
     X_numeric = np.concatenate([X_all[numeric].to_numpy(dtype=np.float64), X_categorical], axis=1)
     feature_order = numeric + categorical
@@ -308,7 +299,6 @@ def evaluate_case_study(
     target_col: str = "income",
     positive_label: str = ">50K",
     random_state: int = 2137,
-    repo_compatibility_education_bug: bool = False,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run the controlled Adult case study.
@@ -356,7 +346,6 @@ def evaluate_case_study(
             subset,
             target_col=target_col,
             protected_col=protected_col,
-            repo_compatibility_education_bug=repo_compatibility_education_bug,
         )
 
         for train_idx, test_idx in holdout.split(X_all):

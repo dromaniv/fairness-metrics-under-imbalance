@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -21,7 +20,7 @@ from adult_case_study import (
     load_adult_dataset,
     paper_ratio_sweep,
 )
-from metric_registry import compute_metric, list_metrics, metric_labels, metrics_metadata_frame
+from metric_registry import list_metrics, compute_metrics, COUNT_COLUMNS
 from plots import (
     plot_case_grouped_bar_by_classifier,
     plot_case_grouped_bar_by_metric,
@@ -63,19 +62,15 @@ def nearest_available_ratios(total: int, targets: list[float]) -> list[float]:
     return chosen
 
 
-_SMOOTHABLE_METRICS = {"cqa_q_association"}
+_SMOOTHABLE_METRICS = {"conditional_q_association"}
 
 
 def apply_smoothing_override(df: pd.DataFrame, metric_key: str, smoothing: bool) -> pd.DataFrame:
-    """Return df with metric_key column recomputed using the requested smoothing setting.
-
-    Only has an effect for CQA-Q. For all other metrics returns df unchanged.
-    """
     if metric_key not in _SMOOTHABLE_METRICS:
         return df
-    from builtin_metrics import cqa_q_association
+    from custom_metrics import conditional_q_association
     out = df.copy()
-    out[metric_key] = cqa_q_association(out, smoothing=smoothing)
+    out[metric_key] = conditional_q_association(out, smoothing=smoothing)
     return out
 
 
@@ -87,14 +82,62 @@ def smoothing_toggle(metric_key: str, widget_key: str) -> bool:
             value=True,
             key=widget_key,
             help="Adds 0.5 to each cell of the per-stratum 2×2 table before computing the odds ratio. "
-                 "When enabled, CQA-Q is always defined (even at IR=0 or IR=1).",
+                 "When enabled, CQA is always defined (even at IR=0 or IR=1).",
         )
     return True  # irrelevant for other metrics, value unused
 
 
+# Mapping from raw metric key → its FRN-wrapped sibling.
+_FRN_KEY_MAP: dict[str, str] = {
+    "accuracy_equality_difference":          "frn_accd",
+    "statistical_parity_difference":         "frn_spd",
+    "equal_opportunity_difference":          "frn_eod",
+    "predictive_equality_difference":        "frn_fprd",
+    "positive_predictive_parity_difference": "frn_ppvd",
+    "negative_predictive_parity_difference": "frn_npvd",
+}
+
+
+def resolve_frn_key(key: str, use_frn: bool) -> str:
+    """Return the FRN variant of *key* when *use_frn* is True and a variant exists."""
+    if use_frn and key in _FRN_KEY_MAP:
+        return _FRN_KEY_MAP[key]
+    return key
+
+
+def frn_toggle(metric_key: str, widget_key: str) -> bool:
+    """Render an FRN checkbox when *metric_key* has an FRN variant; return the current value."""
+    if metric_key in _FRN_KEY_MAP:
+        frn_key = _FRN_KEY_MAP[metric_key]
+        try:
+            frn_label = list_metrics("fairness_frn")
+            frn_label = next(s.label for s in frn_label if s.key == frn_key)
+        except StopIteration:
+            frn_label = frn_key
+        return st.checkbox(
+            "Apply Feasible-Range Normalization",
+            value=False,
+            key=widget_key,
+            help=(
+                "Scales the metric by the maximum (or minimum) value it could reach given the "
+                "current confusion-matrix marginals, so the result is always in [−1, 1].\n\n"
+                f"Shows: **{frn_label}**"
+            ),
+        )
+    return False
+
+
+def apply_frn_to_keys(keys: list[str], use_frn: bool) -> list[str]:
+    """Replace each key in *keys* with its FRN variant when *use_frn* is True."""
+    return [resolve_frn_key(k, use_frn) for k in keys]
+
+
 def _valid_fairness_keys(keys: list[str]) -> list[str]:
-    """Filter out any keys no longer present in the registry (e.g. from stale session state)."""
-    registered = {spec.key for spec in list_metrics("fairness")}
+    """Filter out any keys no longer present in the registry (e.g. from stale session state).
+    Accepts both 'fairness' and 'fairness_frn' category keys.
+    """
+    registered = {spec.key for spec in list_metrics("fairness")} | \
+                 {spec.key for spec in list_metrics("fairness_frn")}
     return [k for k in keys if k in registered]
 
 
@@ -127,16 +170,25 @@ def metric_selector(label: str, category: str, default_keys: list[str] | None = 
 
 def render_metric_registry_page() -> None:
     st.header("Metric registry")
-    st.write(
-        "Use this page to inspect the built-in metrics and confirm which file to edit when you want to add your own."
-    )
     if CUSTOM_METRIC_IMPORT_ERROR:
         st.warning(f"custom_metrics.py failed to import: {CUSTOM_METRIC_IMPORT_ERROR}")
-    st.dataframe(metrics_metadata_frame(), use_container_width=True, hide_index=True)
-    st.code(
-        Path(__file__).with_name("custom_metrics.py").read_text(encoding="utf-8"),
-        language="python",
-    )
+
+    category_labels = {
+        "fairness":     "Fairness metrics",
+        "fairness_frn": "Feasible-Range Normalized metrics",
+        "performance":  "Performance metrics",
+        "component":    "Component metrics",
+        "ratio":        "Ratio metrics",
+    }
+
+    all_cats = list(dict.fromkeys(s.category for s in list_metrics()))
+    for cat in all_cats:
+        specs = list_metrics(cat)
+        st.subheader(category_labels.get(cat, cat))
+        for spec in specs:
+            with st.expander(spec.label):
+                st.latex(spec.formula)
+                st.caption(spec.description)
 
 
 def render_synthetic_page() -> None:
@@ -267,13 +319,15 @@ def render_synthetic_page() -> None:
         ))
         show_nan_bar = st.checkbox("Show separate undefined-value bar", value=True, key="hist_nan_bar")
         hist_smoothing = smoothing_toggle(metric_key, "hist_smoothing")
+        hist_frn = frn_toggle(metric_key, "hist_frn")
+        active_metric_key = resolve_frn_key(metric_key, hist_frn)
 
         if selected_gr and selected_ir:
-            hist_df = apply_smoothing_override(synthetic_df, metric_key, hist_smoothing)
+            hist_df = apply_smoothing_override(synthetic_df, active_metric_key, hist_smoothing)
             fig = plot_histogram_grid(
                 hist_df,
-                metric_key,
-                fairness_label_map[metric_key],
+                active_metric_key,
+                fairness_label_map.get(active_metric_key, fairness_label_map[metric_key]),
                 selected_gr,
                 selected_ir,
                 bins=bins,
@@ -284,7 +338,7 @@ def render_synthetic_page() -> None:
             st.download_button(
                 "Download histogram grid (PNG)",
                 data=figure_png_bytes(fig),
-                file_name=f"histogram_grid_{metric_key}.png",
+                file_name=f"histogram_grid_{active_metric_key}.png",
                 mime="image/png",
             )
         else:
@@ -315,27 +369,43 @@ def render_synthetic_page() -> None:
             help="Applies +0.5 smoothing when computing Conditional Q Association.",
         ) if any(k in _SMOOTHABLE_METRICS for k in selected_metric_keys) else True
 
+        ppf_frn = st.checkbox(
+            "Apply Feasible-Range Normalization to supported metrics",
+            value=False,
+            key="ppf_frn",
+            help=(
+                "Replaces each metric that has a feasible-range normalized variant with that version. "
+                "Supported: " + ", ".join(
+                    s.label for s in list_metrics("fairness") if s.key in _FRN_KEY_MAP
+                )
+            ),
+        ) if any(k in _FRN_KEY_MAP for k in selected_metric_keys) else False
+
+        active_ppf_keys = apply_frn_to_keys(selected_metric_keys, ppf_frn)
+        # rebuild label map to include any FRN keys that replaced raw ones
+        all_ppf_label_map = {**fairness_label_map, **{spec.key: spec.label for spec in list_metrics("fairness_frn")}}
+
         if selected_metric_keys:
             ppf_work_df = synthetic_df
-            for k in selected_metric_keys:
+            for k in active_ppf_keys:
                 ppf_work_df = apply_smoothing_override(ppf_work_df, k, ppf_smoothing)
             ppf_df = probability_of_perfect_fairness(
                 ppf_work_df,
-                selected_metric_keys,
+                active_ppf_keys,
                 ratio_type,
                 epsilon=epsilon,
                 group_ratio_basis=ppf_basis,
             )
             nan_df = probability_of_nan(
                 ppf_work_df,
-                selected_metric_keys,
+                active_ppf_keys,
                 ratio_type,
                 group_ratio_basis=ppf_basis,
             )
             fig1 = plot_probability_lines(
                 ppf_df,
-                selected_metric_keys,
-                fairness_label_map,
+                active_ppf_keys,
+                all_ppf_label_map,
                 ratio_type,
                 title="Probability of perfect fairness",
                 y_label="Probability of perfect fairness",
@@ -344,8 +414,8 @@ def render_synthetic_page() -> None:
             )
             fig2 = plot_probability_lines(
                 nan_df,
-                selected_metric_keys,
-                fairness_label_map,
+                active_ppf_keys,
+                all_ppf_label_map,
                 ratio_type,
                 title="Probability of undefined values",
                 y_label="Probability of undefined metric value",
@@ -387,11 +457,13 @@ def render_synthetic_page() -> None:
         )
         heat_bins = int(col3.number_input("Heatmap bins", min_value=10, value=100, step=10, key="heatmap_bins"))
         heat_smoothing = smoothing_toggle(fairness_key, "heatmap_smoothing")
-        heat_df = apply_smoothing_override(synthetic_df, fairness_key, heat_smoothing)
+        heat_frn = frn_toggle(fairness_key, "heatmap_frn")
+        active_fairness_key = resolve_frn_key(fairness_key, heat_frn)
+        heat_df = apply_smoothing_override(synthetic_df, active_fairness_key, heat_smoothing)
         fig = plot_metric_vs_performance_heatmap(
             heat_df,
-            fairness_key,
-            fairness_label_map[fairness_key],
+            active_fairness_key,
+            fairness_label_map.get(active_fairness_key, fairness_label_map[fairness_key]),
             performance_key,
             performance_label_map[performance_key],
             bins=heat_bins,
@@ -400,26 +472,45 @@ def render_synthetic_page() -> None:
         st.download_button(
             "Download heatmap (PNG)",
             data=figure_png_bytes(fig),
-            file_name=f"heatmap_{fairness_key}_vs_{performance_key}.png",
+            file_name=f"heatmap_{active_fairness_key}_vs_{performance_key}.png",
             mime="image/png",
         )
 
     with tabs[3]:
         st.subheader("Synthetic data table")
-        preview_keys = [spec.key for spec in fairness_specs] + [spec.key for spec in performance_metric_specs()]
-        preview_label_map = metric_labels(preview_keys)
+        all_preview_specs = list_metrics("fairness")
+        all_preview_keys = [s.key for s in all_preview_specs]
+        all_preview_labels = {s.key: s.label for s in all_preview_specs}
         preview_metric_keys = st.multiselect(
             "Additional metric columns",
-            options=preview_keys,
+            options=all_preview_keys,
             default=[],
-            format_func=lambda key: preview_label_map.get(key, key),
+            format_func=lambda key: all_preview_labels.get(key, key),
             key="synthetic_preview_metrics",
         )
-        preview_df = synthetic_df.copy()
-        for key in preview_metric_keys:
-            if key not in preview_df.columns:
-                preview_df[key] = compute_metric(preview_df, key)
-        st.dataframe(preview_df.head(1000), use_container_width=True)
+        hide_degenerate = st.checkbox(
+            "Hide rows where either group is empty",
+            value=True,
+            key="synthetic_hide_degenerate",
+            help="Removes rows where i_total=0 or j_total=0. These produce NaN for most metrics.",
+        )
+        work_df = synthetic_df.copy()
+        if hide_degenerate:
+            i_total = work_df["i_tp"] + work_df["i_fp"] + work_df["i_tn"] + work_df["i_fn"]
+            j_total = work_df["j_tp"] + work_df["j_fp"] + work_df["j_tn"] + work_df["j_fn"]
+            work_df = work_df[(i_total > 0) & (j_total > 0)].reset_index(drop=True)
+        else:
+            work_df = work_df.reset_index(drop=True)
+
+        perf_computed = compute_metrics(work_df, ["accuracy", "g_mean"]).reset_index(drop=True)
+        base_df = work_df[COUNT_COLUMNS].reset_index(drop=True)
+        if preview_metric_keys:
+            extra_computed = compute_metrics(work_df, preview_metric_keys).reset_index(drop=True)
+            display_df = pd.concat([base_df, perf_computed, extra_computed], axis=1)
+        else:
+            display_df = pd.concat([base_df, perf_computed], axis=1)
+        st.caption(f"Showing {min(1000, len(display_df)):,} of {len(display_df):,} rows.")
+        st.dataframe(display_df.head(1000), use_container_width=True)
 
 
 def render_case_study_page() -> None:
@@ -467,10 +558,14 @@ def render_case_study_page() -> None:
             "fairness",
             default_keys=[spec.key for spec in fairness_metric_specs()],
         )
-        repo_bug = st.checkbox(
-            "Reproduce the original education-encoding broadcast bug",
+        case_frn = st.checkbox(
+            "Apply Feasible-Range Normalization to supported metrics",
             value=False,
-            key="adult_repo_bug",
+            key="adult_frn",
+            help=(
+                "Replaces each selected metric that has a feasible-range normalized variant with its "
+                "normalized version before running the experiment."
+            ),
         )
 
         if st.button("Run Adult case study", type="primary"):
@@ -483,7 +578,9 @@ def render_case_study_page() -> None:
                     adult_df = load_adult_dataset(path_value)
 
                 # Guard against stale widget state holding keys removed from the registry.
-                validated_metrics = _valid_fairness_keys(selected_fairness_metrics)
+                validated_metrics = _valid_fairness_keys(
+                    apply_frn_to_keys(selected_fairness_metrics, case_frn)
+                )
                 if not validated_metrics:
                     raise ValueError("No valid fairness metrics selected.")
 
@@ -503,7 +600,6 @@ def render_case_study_page() -> None:
                     classifier_names=selected_classifiers,
                     fairness_metric_keys=validated_metrics,
                     random_state=int(random_state),
-                    repo_compatibility_education_bug=repo_bug,
                     progress_callback=_progress,
                 )
                 _progress_bar.empty()
@@ -520,7 +616,8 @@ def render_case_study_page() -> None:
         st.info("Provide the Adult dataset in the sidebar and run the experiment.")
         return
 
-    fairness_label_map = metric_labels(pd.unique(fairness_results["metric"]))
+    all_fairness_specs = list_metrics("fairness") + list_metrics("fairness_frn")
+    fairness_label_map = {spec.key: spec.label for spec in all_fairness_specs}
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Fairness rows", f"{len(fairness_results):,}")

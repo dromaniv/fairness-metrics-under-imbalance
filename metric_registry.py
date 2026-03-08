@@ -29,6 +29,7 @@ class MetricSpec:
     description: str
     formula: str
     compute: MetricFunc
+    sort_order: int = 999  # lower = earlier in list_metrics; classical metrics use 0–7
 
 
 _METRICS: Dict[str, MetricSpec] = {}
@@ -76,7 +77,7 @@ def list_metrics(category: str | None = None) -> list[MetricSpec]:
     specs = list(_METRICS.values())
     if category is not None:
         specs = [spec for spec in specs if spec.category == category]
-    return sorted(specs, key=lambda spec: (spec.category, spec.label))
+    return sorted(specs, key=lambda spec: (spec.category, spec.sort_order, spec.label))
 
 
 def get_metric(key: str) -> MetricSpec:

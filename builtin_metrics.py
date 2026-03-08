@@ -6,6 +6,17 @@ import numpy as np
 import pandas as pd
 
 from metric_registry import MetricSpec, register_metric, safe_divide
+from metric_bounds import (
+    compute_bounds,
+    frn,
+    BOUNDS_SUPPORTED_KEYS,
+    spd_bounds,
+    eod_bounds,
+    fprd_bounds,
+    accd_bounds,
+    ppvd_bounds,
+    npvd_bounds,
+)
 
 
 def _i_total(df: pd.DataFrame) -> pd.Series:
@@ -117,76 +128,32 @@ def equalized_odds_diff(df: pd.DataFrame) -> np.ndarray:
 
 
 def _odds_ratio_to_q(or_val: np.ndarray) -> np.ndarray:
-    """Map an odds-ratio array to Q = (OR-1)/(OR+1)."""
     denom = or_val + 1.0
     out = np.full_like(or_val, np.nan, dtype=np.float64)
     np.divide(or_val - 1.0, denom, out=out, where=denom != 0)
     return out
 
 
-def cqa_q_association(df: pd.DataFrame, smoothing: bool = True) -> np.ndarray:
-    """Conditional Q Association (CQA-Q): Yule-Q RMS within each Y=y stratum.
 
-    With smoothing=True (default, kappa=0.5) uses Haldane-Anscombe correction
-    applied directly to the four cells — never pre-checks for empty strata.
-    When all four cells of a stratum are zero and kappa>0, OR_y = 1 and Q_y = 0,
-    so the metric remains fully defined everywhere except when kappa=0 and a
-    zero denominator arises.
+# ---------------------------------------------------------------------------
+# FRN-wrapped metrics
+# ---------------------------------------------------------------------------
 
-    2×2 table of (ŷ, S) within each Y=y stratum:
-      Y=1:  a1=i_tp  b1=j_tp  c1=i_fn  d1=j_fn
-      Y=0:  a0=i_fp  b0=j_fp  c0=i_tn  d0=j_tn
-    """
-    kappa = 0.5 if smoothing else 0.0
-
-    a1 = np.asarray(df["i_tp"], dtype=np.float64)
-    b1 = np.asarray(df["j_tp"], dtype=np.float64)
-    c1 = np.asarray(df["i_fn"], dtype=np.float64)
-    d1 = np.asarray(df["j_fn"], dtype=np.float64)
-
-    a0 = np.asarray(df["i_fp"], dtype=np.float64)
-    b0 = np.asarray(df["j_fp"], dtype=np.float64)
-    c0 = np.asarray(df["i_tn"], dtype=np.float64)
-    d0 = np.asarray(df["j_tn"], dtype=np.float64)
-
-    # Compute OR directly from smoothed cells — no empty-stratum pre-check.
-    # When kappa > 0, denominator is always > 0 so safe_divide never fires.
-    # When kappa = 0, safe_divide returns NaN on zero denominators (correct).
-    or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
-    or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
-
-    q1 = _odds_ratio_to_q(or1)
-    q0 = _odds_ratio_to_q(or0)
-
-    result = np.full(len(df), np.nan, dtype=np.float64)
-    valid = ~(np.isnan(q0) | np.isnan(q1))
-    result[valid] = np.sqrt((q0[valid] ** 2 + q1[valid] ** 2) / 2.0)
-    return result
+def _frn_wrap(raw_fn, bounds_fn):
+    """Return a compute function that applies FRN to *raw_fn* using *bounds_fn*."""
+    def _compute(df: pd.DataFrame) -> np.ndarray:
+        raw    = np.asarray(raw_fn(df), dtype=np.float64)
+        bounds = bounds_fn(df)
+        return frn(raw, bounds.m_min, bounds.m_max)
+    return _compute
 
 
-def fairness_phi(df: pd.DataFrame) -> np.ndarray:
-    """Φ_fair — Fairness Phi (point-biserial φ between ŷ and S).
-
-    2×2 joint table of (ŷ, S):
-      n11 = i_tp + i_fp  (ŷ=1, S=1)
-      n10 = j_tp + j_fp  (ŷ=1, S=0)
-      n01 = i_tn + i_fn  (ŷ=0, S=1)
-      n00 = j_tn + j_fn  (ŷ=0, S=0)
-    """
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
-
-    n1_dot = n11 + n10   # P(ŷ=1) * N
-    n0_dot = n01 + n00   # P(ŷ=0) * N
-    n_dot1 = n11 + n01   # P(S=1) * N
-    n_dot0 = n10 + n00   # P(S=0) * N
-
-    numerator = n11 * n00 - n10 * n01
-    denominator_sq = n1_dot * n0_dot * n_dot1 * n_dot0
-    denominator = np.sqrt(np.where(denominator_sq > 0, denominator_sq, np.nan))
-    return safe_divide(numerator, denominator)
+frn_spd  = _frn_wrap(statistical_parity_diff,         spd_bounds)
+frn_eod  = _frn_wrap(equal_opportunity_diff,           eod_bounds)
+frn_fprd = _frn_wrap(predictive_equality_diff,         fprd_bounds)
+frn_accd = _frn_wrap(acc_equality_diff,                accd_bounds)
+frn_ppvd = _frn_wrap(positive_predictive_parity_diff,  ppvd_bounds)
+frn_npvd = _frn_wrap(negative_predictive_parity_diff,  npvd_bounds)
 
 
 def register_builtin_metrics() -> None:
@@ -299,79 +266,118 @@ def register_builtin_metrics() -> None:
             key="accuracy_equality_difference",
             label="Accuracy Equality Difference",
             category="fairness",
-            description="Difference in per-group accuracy using the repository sign convention j - i.",
-            formula="(j_tp + j_tn)/j_total - (i_tp + i_tn)/i_total",
+            sort_order=0,
+            description="Difference in per-group accuracy, j − i.",
+            formula=r"\frac{j_\mathrm{tp}+j_\mathrm{tn}}{n_j} - \frac{i_\mathrm{tp}+i_\mathrm{tn}}{n_i}",
             compute=acc_equality_diff,
         ),
         MetricSpec(
             key="statistical_parity_difference",
             label="Statistical Parity Difference",
             category="fairness",
-            description="Difference in predicted-positive rate using the repository sign convention j - i.",
-            formula="(j_tp + j_fp)/j_total - (i_tp + i_fp)/i_total",
+            sort_order=1,
+            description="Difference in predicted-positive rate, j − i.",
+            formula=r"\frac{j_\mathrm{tp}+j_\mathrm{fp}}{n_j} - \frac{i_\mathrm{tp}+i_\mathrm{fp}}{n_i}",
             compute=statistical_parity_diff,
         ),
         MetricSpec(
             key="equal_opportunity_difference",
             label="Equal Opportunity Difference",
             category="fairness",
-            description="Difference in true positive rate between groups, j - i.",
-            formula="j_tpr - i_tpr",
+            sort_order=2,
+            description="Difference in true positive rate (recall), j − i.",
+            formula=r"\frac{j_\mathrm{tp}}{j_\mathrm{tp}+j_\mathrm{fn}} - \frac{i_\mathrm{tp}}{i_\mathrm{tp}+i_\mathrm{fn}}",
             compute=equal_opportunity_diff,
         ),
         MetricSpec(
             key="equalized_odds_difference",
             label="Equalized Odds Difference",
             category="fairness",
+            sort_order=3,
             description="Max of |TPR gap| and |FPR gap| between groups. Zero iff equalized odds holds.",
-            formula="max(|j_tpr - i_tpr|, |j_fpr - i_fpr|)",
+            formula=r"\max\!\bigl(|\Delta\mathrm{TPR}|,\,|\Delta\mathrm{FPR}|\bigr)",
             compute=equalized_odds_diff,
         ),
         MetricSpec(
             key="predictive_equality_difference",
             label="Predictive Equality Difference",
             category="fairness",
-            description="Difference in false positive rate between groups, j - i.",
-            formula="j_fpr - i_fpr",
+            sort_order=4,
+            description="Difference in false positive rate, j − i.",
+            formula=r"\frac{j_\mathrm{fp}}{j_\mathrm{fp}+j_\mathrm{tn}} - \frac{i_\mathrm{fp}}{i_\mathrm{fp}+i_\mathrm{tn}}",
             compute=predictive_equality_diff,
         ),
         MetricSpec(
             key="positive_predictive_parity_difference",
             label="Positive Predictive Parity Difference",
             category="fairness",
-            description="Difference in positive predictive value between groups, j - i.",
-            formula="j_ppv - i_ppv",
+            sort_order=5,
+            description="Difference in positive predictive value (precision), j − i.",
+            formula=r"\frac{j_\mathrm{tp}}{j_\mathrm{tp}+j_\mathrm{fp}} - \frac{i_\mathrm{tp}}{i_\mathrm{tp}+i_\mathrm{fp}}",
             compute=positive_predictive_parity_diff,
         ),
         MetricSpec(
             key="negative_predictive_parity_difference",
             label="Negative Predictive Parity Difference",
             category="fairness",
-            description="Difference in negative predictive value between groups, j - i.",
-            formula="j_npv - i_npv",
+            sort_order=6,
+            description="Difference in negative predictive value, j − i.",
+            formula=r"\frac{j_\mathrm{tn}}{j_\mathrm{tn}+j_\mathrm{fn}} - \frac{i_\mathrm{tn}}{i_\mathrm{tn}+i_\mathrm{fn}}",
             compute=negative_predictive_parity_diff,
         ),
         MetricSpec(
-            key="cqa_q_association",
-            label="Conditional Q Association",
-            category="fairness",
-            description=(
-                "Conditional Q Association (CQA-Q): RMS of Yule-Q odds-ratio statistics within each "
-                "label stratum. Bounded in [0,1). Smoothed with Haldane-Anscombe +0.5 by default."
-            ),
-            formula="sqrt((Q0^2 + Q1^2) / 2), OR_y with Haldane-Anscombe smoothing kappa=0.5",
-            compute=cqa_q_association,
+            key="frn_spd",
+            label="Statistical Parity Difference (FRN)",
+            category="fairness_frn",
+            sort_order=1,
+            description="SPD scaled by its feasible extreme given fixed group sizes and total predicted positives.",
+            formula=r"\mathrm{FRN}(M)=\begin{cases}M/M_{\max}&M>0\\M/|M_{\min}|&M<0\\0&M=0\end{cases}",
+            compute=frn_spd,
         ),
         MetricSpec(
-            key="fairness_phi",
-            label="Phi Fair",
-            category="fairness",
-            description=(
-                "Phi Fair (Φ_fair): point-biserial φ coefficient between prediction ŷ and protected attribute S. "
-                "Zero iff ŷ ⊥ S. Range [-1, 1]; sign indicates direction of association."
-            ),
-            formula="(n11*n00 - n10*n01) / sqrt(n1. * n0. * n.1 * n.0)",
-            compute=fairness_phi,
+            key="frn_eod",
+            label="Equal Opportunity Difference (FRN)",
+            category="fairness_frn",
+            sort_order=2,
+            description="EOD scaled by its feasible extreme given fixed marginals.",
+            formula=r"\mathrm{FRN}(\Delta\mathrm{TPR})",
+            compute=frn_eod,
+        ),
+        MetricSpec(
+            key="frn_fprd",
+            label="Predictive Equality Difference (FRN)",
+            category="fairness_frn",
+            sort_order=3,
+            description="FPR difference scaled by its feasible extreme given fixed marginals.",
+            formula=r"\mathrm{FRN}(\Delta\mathrm{FPR})",
+            compute=frn_fprd,
+        ),
+        MetricSpec(
+            key="frn_accd",
+            label="Accuracy Equality Difference (FRN)",
+            category="fairness_frn",
+            sort_order=0,
+            description="Accuracy equality difference scaled by its feasible extreme given fixed marginals.",
+            formula=r"\mathrm{FRN}(\Delta\mathrm{ACC})",
+            compute=frn_accd,
+        ),
+        MetricSpec(
+            key="frn_ppvd",
+            label="Positive Predictive Parity Difference (FRN)",
+            category="fairness_frn",
+            sort_order=4,
+            description="PPV difference scaled by its feasible extreme given fixed marginals.",
+            formula=r"\mathrm{FRN}(\Delta\mathrm{PPV})",
+            compute=frn_ppvd,
+        ),
+        MetricSpec(
+            key="frn_npvd",
+            label="Negative Predictive Parity Difference (FRN)",
+            category="fairness_frn",
+            sort_order=5,
+            description="NPV difference scaled by its feasible extreme given fixed marginals.",
+            formula=r"\mathrm{FRN}(\Delta\mathrm{NPV})",
+            compute=frn_npvd,
         ),
     ]
 
@@ -390,8 +396,15 @@ FAIRNESS_METRIC_KEYS = [
     "predictive_equality_difference",
     "positive_predictive_parity_difference",
     "negative_predictive_parity_difference",
-    "cqa_q_association",
-    "fairness_phi",
+]
+
+FRN_METRIC_KEYS = [
+    "frn_spd",
+    "frn_eod",
+    "frn_fprd",
+    "frn_accd",
+    "frn_ppvd",
+    "frn_npvd",
 ]
 
 
