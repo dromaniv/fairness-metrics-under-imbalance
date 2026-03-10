@@ -62,15 +62,16 @@ def nearest_available_ratios(total: int, targets: list[float]) -> list[float]:
     return chosen
 
 
-_SMOOTHABLE_METRICS = {"conditional_q_association"}
+_SMOOTHABLE_METRICS = {"conditional_q_association", "conditional_y_association"}
 
 
 def apply_smoothing_override(df: pd.DataFrame, metric_key: str, smoothing: bool) -> pd.DataFrame:
     if metric_key not in _SMOOTHABLE_METRICS:
         return df
-    from custom_metrics import conditional_q_association
+    from custom_metrics import conditional_q_association, conditional_y_association
+    fn = conditional_q_association if metric_key == "conditional_q_association" else conditional_y_association
     out = df.copy()
-    out[metric_key] = conditional_q_association(out, smoothing=smoothing)
+    out[metric_key] = fn(out, smoothing=smoothing)
     return out
 
 
