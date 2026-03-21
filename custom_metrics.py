@@ -12,6 +12,14 @@ from metric_registry import MetricSpec, register_metric, safe_divide
 from builtin_metrics import _odds_ratio_to_q
 
 
+def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
+    sqrt_or = np.sqrt(np.where(or_val >= 0, or_val, np.nan))
+    denom = sqrt_or + 1.0
+    out = np.full_like(or_val, np.nan, dtype=np.float64)
+    np.divide(sqrt_or - 1.0, denom, out=out, where=denom != 0)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Fairness Phi
 # ---------------------------------------------------------------------------
@@ -43,6 +51,16 @@ def marginal_q_association(df: pd.DataFrame) -> np.ndarray:
     return safe_divide(ad - bc, ad + bc)
 
 
+def marginal_y_association(df: pd.DataFrame) -> np.ndarray:
+    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
+    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
+    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
+    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    sqrt_ad = np.sqrt(np.where(n11 * n00 >= 0, n11 * n00, np.nan))
+    sqrt_bc = np.sqrt(np.where(n10 * n01 >= 0, n10 * n01, np.nan))
+    return safe_divide(sqrt_ad - sqrt_bc, sqrt_ad + sqrt_bc)
+
+
 # ---------------------------------------------------------------------------
 # Conditional Q Association
 # ---------------------------------------------------------------------------
@@ -64,6 +82,26 @@ def conditional_q_association(df: pd.DataFrame, smoothing: bool = True) -> np.nd
     result = np.full(len(df), np.nan, dtype=np.float64)
     valid = ~(np.isnan(q0) | np.isnan(q1))
     result[valid] = np.sqrt((q0[valid] ** 2 + q1[valid] ** 2) / 2.0)
+    return result
+
+
+def conditional_y_association(df: pd.DataFrame, smoothing: bool = True) -> np.ndarray:
+    kappa = 0.5 if smoothing else 0.0
+    a1 = np.asarray(df["i_tp"], dtype=np.float64)
+    b1 = np.asarray(df["j_tp"], dtype=np.float64)
+    c1 = np.asarray(df["i_fn"], dtype=np.float64)
+    d1 = np.asarray(df["j_fn"], dtype=np.float64)
+    a0 = np.asarray(df["i_fp"], dtype=np.float64)
+    b0 = np.asarray(df["j_fp"], dtype=np.float64)
+    c0 = np.asarray(df["i_tn"], dtype=np.float64)
+    d0 = np.asarray(df["j_tn"], dtype=np.float64)
+    or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
+    or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
+    y1 = _odds_ratio_to_y(or1)
+    y0 = _odds_ratio_to_y(or0)
+    result = np.full(len(df), np.nan, dtype=np.float64)
+    valid = ~(np.isnan(y0) | np.isnan(y1))
+    result[valid] = np.sqrt((y0[valid] ** 2 + y1[valid] ** 2) / 2.0)
     return result
 
 
@@ -152,10 +190,24 @@ register_metric(MetricSpec(
 ))
 
 register_metric(MetricSpec(
+    key="marginal_y_association",
+    label="Marginal Y Association",
+    category="fairness",
+    sort_order=102,
+    description=(
+        "Yule's Y on the marginal 2×2 table of (Ŷ, S). "
+        "Y = (√(ad) − √(bc)) / (√(ad) + √(bc)). "
+        "Zero iff Ŷ ⊥ S. Bounded in [−1, 1]; monotone transform of Q."
+    ),
+    formula=r"Y = \frac{\sqrt{n_{11}n_{00}}-\sqrt{n_{10}n_{01}}}{\sqrt{n_{11}n_{00}}+\sqrt{n_{10}n_{01}}}",
+    compute=marginal_y_association,
+))
+
+register_metric(MetricSpec(
     key="conditional_q_association",
     label="Conditional Q Association",
     category="fairness",
-    sort_order=102,
+    sort_order=103,
     description=(
         "CQA: RMS of Yule-Q within each label stratum Y=y. "
         "Bounded in [0, 1). Uses Haldane-Anscombe +0.5 smoothing by default."
@@ -165,10 +217,23 @@ register_metric(MetricSpec(
 ))
 
 register_metric(MetricSpec(
+    key="conditional_y_association",
+    label="Conditional Y Association",
+    category="fairness",
+    sort_order=104,
+    description=(
+        "CYA: RMS of Yule's Y within each label stratum Y=y. "
+        "Bounded in [0, 1). Uses Haldane-Anscombe +0.5 smoothing by default."
+    ),
+    formula=r"\mathrm{CYA} = \sqrt{\frac{Y_0^2+Y_1^2}{2}},\quad Y_y=\frac{\sqrt{\mathrm{OR}_y}-1}{\sqrt{\mathrm{OR}_y}+1}",
+    compute=conditional_y_association,
+))
+
+register_metric(MetricSpec(
     key="mutual_information",
     label="Mutual Information",
     category="fairness",
-    sort_order=103,
+    sort_order=105,
     description=(
         "Discrete MI(Ŷ; S) on the 2×2 table. "
         "Zero iff Ŷ ⊥ S. Non-negative, unsigned."
@@ -181,7 +246,7 @@ register_metric(MetricSpec(
     key="normalized_mutual_information",
     label="Normalized Mutual Information",
     category="fairness",
-    sort_order=104,
+    sort_order=106,
     description=(
         "NMI = MI / sqrt(H(Ŷ)·H(S)). Scales MI to roughly [0, 1]. "
         "NaN when either marginal entropy is zero."
