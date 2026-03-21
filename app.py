@@ -83,7 +83,7 @@ def smoothing_toggle(metric_key: str, widget_key: str) -> bool:
             value=True,
             key=widget_key,
             help="Adds 0.5 to each cell of the per-stratum 2×2 table before computing the odds ratio. "
-                 "When enabled, CQA is always defined (even at IR=0 or IR=1).",
+                 "When enabled, CQA and CYA is always defined (even at IR=0 or IR=1).",
         )
     return True  # irrelevant for other metrics, value unused
 
