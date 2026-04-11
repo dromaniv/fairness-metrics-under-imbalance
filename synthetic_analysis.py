@@ -47,7 +47,6 @@ def ratio_mask(series: pd.Series, value: float, atol: float = 1e-9) -> np.ndarra
     return np.isclose(series.to_numpy(dtype=np.float64), float(value), atol=atol, rtol=0.0)
 
 
-
 def select_histogram_slice(
     df: pd.DataFrame,
     metric_key: str,
@@ -66,7 +65,6 @@ def select_histogram_slice(
     for value in ir_values:
         ir_mask |= ratio_mask(out[ir_col], value)
     return out.loc[gr_mask & ir_mask].copy()
-
 
 
 def probability_of_perfect_fairness(
@@ -97,7 +95,6 @@ def probability_of_perfect_fairness(
     return pd.DataFrame(rows)
 
 
-
 def probability_of_nan(
     df: pd.DataFrame,
     metric_keys: Iterable[str],
@@ -116,7 +113,6 @@ def probability_of_nan(
             row[key] = float(group[key].isna().mean())
         rows.append(row)
     return pd.DataFrame(rows)
-
 
 
 def value_grid_for_heatmap(

@@ -10,16 +10,17 @@ Python 3.11 · Streamlit · pandas · numpy · matplotlib · scikit-learn · imb
 
 | File | Responsibility |
 |---|---|
-| `metric_registry.py` | `MetricSpec` dataclass, `register_metric`, `list_metrics`, `compute_metric(s)` |
+| `metric_registry.py` | `MetricSpec` dataclass, `register_metric`, `list_metrics`, `compute_metric(s)`, `safe_divide`, `odds_ratio_to_q` |
 | `builtin_metrics.py` | All built-in metric compute functions + `register_builtin_metrics()` |
-| `custom_metrics.py` | User-extensible metrics (optional import) |
+| `custom_metrics.py` | User-extensible metrics (optional import); imports `odds_ratio_to_q` from registry |
 | `metric_bounds.py` | Feasible-range bounds for FRN normalization |
 | `synthetic_data.py` | Confusion-matrix generation (exact / Monte Carlo / pickle) + `add_base_columns` |
 | `synthetic_analysis.py` | `probability_of_perfect_fairness`, `probability_of_nan`, `ensure_metric_columns` |
 | `stereotypical_study.py` | SR-sweep helpers: `metric_means_by_sr_multi_ir`, `compute_sr_sensitivity`, `compute_sr_sensitivity_stratified` |
 | `adult_case_study.py` | Adult dataset loading, sampler, experiment runner, `collect_adult_confusion_matrices` |
-| `plots.py` | All matplotlib figure builders (no computation logic) |
-| `app.py` | Streamlit UI only — imports from all above, no domain logic |
+| `fairness_benchmark.py` | Discrimination injection, detection power, ROC analysis |
+| `plots.py` | All matplotlib figure builders (no computation logic); `plot_case_line(absolute=bool)` |
+| `app.py` | Streamlit UI only — shared helpers: `_build_synthetic_dataset`, `_filter_degenerate`, `_render_data_table_tab` |
 
 ---
 

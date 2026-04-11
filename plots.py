@@ -35,7 +35,7 @@ STYLE_OVERRIDES = {
     "Negative Predictive Parity Difference": {"color": "#EECC66", "marker": "+"},
     "Positive Predictive Parity Difference": {"color": "#EE99AA", "marker": "o"},
     "Conditional Q Association": {"color": "#AA3377", "marker": "D"},
-    "Phi Fair": {"color": "#BBBBBB", "marker": "s"},
+    "Fairness Phi": {"color": "#BBBBBB", "marker": "s"},
 }
 
 
@@ -48,22 +48,18 @@ def ratio_label(value: float, *, max_denominator: int = 500) -> str:
     return f"{float(value):.2f}"
 
 
-
 def decimal_ratio_labels(values: Iterable[float]) -> list[str]:
     return [f"{float(value):.2f}".rstrip("0").rstrip(".") for value in values]
-
 
 
 def _metric_style(label: str, idx: int) -> dict[str, object]:
     return STYLE_OVERRIDES.get(label, {"color": COLOURS[idx % len(COLOURS)], "marker": "o"})
 
 
-
 def _axis_label(ratio_type: str, group_ratio_basis: str = "j") -> str:
     if ratio_type in ("ir", "sr", "sr_n", "sr_c"):
         return X_LABELS.get(ratio_type, ratio_type.upper())
     return f"{X_LABELS.get(ratio_type, ratio_type.upper())} ({group_ratio_basis}-basis)"
-
 
 
 def plot_histogram_grid(
@@ -156,7 +152,6 @@ def plot_histogram_grid(
     return fig
 
 
-
 def plot_probability_lines(
     df: pd.DataFrame,
     metric_keys: list[str],
@@ -186,7 +181,6 @@ def plot_probability_lines(
     return fig
 
 
-
 def plot_metric_vs_performance_heatmap(
     df: pd.DataFrame,
     fairness_key: str,
@@ -205,7 +199,6 @@ def plot_metric_vs_performance_heatmap(
     fig.colorbar(mesh, ax=ax, label="Proportion of confusion matrices")
     fig.tight_layout()
     return fig
-
 
 
 def _case_plot_stats(
@@ -240,7 +233,6 @@ def _case_plot_stats(
     return ratios, clfs, mean, stdev, err
 
 
-
 def plot_case_line(
     fairness_df: pd.DataFrame,
     metric_key: str,
@@ -248,23 +240,26 @@ def plot_case_line(
     ratio_type: str,
     *,
     fill: str = "std",
-    ylim: tuple[float, float] | None = (-0.9, 0.9),
+    absolute: bool = False,
+    ylim: tuple[float, float] | None = None,
 ) -> plt.Figure:
-    ratios, clfs, mean, stdev, err = _case_plot_stats(fairness_df, metric_key, ratio_type)
+    if ylim is None:
+        ylim = (0.0, 0.6) if absolute else (-0.9, 0.9)
+    ratios, clfs, mean, stdev, err = _case_plot_stats(
+        fairness_df, metric_key, ratio_type, absolute=absolute,
+    )
     fig, ax = plt.subplots(figsize=(9, 9))
-    ax.set_ylabel(metric_label)
+    ax.set_ylabel(f"|{metric_label}|" if absolute else metric_label)
     ax.set_xlabel(ratio_type.upper())
-    ax.axhline(0, color="black", linestyle="--", alpha=0.3)
+    if not absolute:
+        ax.axhline(0, color="black", linestyle="--", alpha=0.3)
 
     for idx, clf in enumerate(clfs):
         y = [mean[(ratio, clf)] for ratio in ratios]
         ax.plot(ratios, y, label=clf, color=COLOURS[idx % len(COLOURS)], marker="o")
-        if fill == "err":
-            low = [mean[(ratio, clf)] - err[(ratio, clf)] for ratio in ratios]
-            high = [mean[(ratio, clf)] + err[(ratio, clf)] for ratio in ratios]
-        else:
-            low = [mean[(ratio, clf)] - stdev[(ratio, clf)] for ratio in ratios]
-            high = [mean[(ratio, clf)] + stdev[(ratio, clf)] for ratio in ratios]
+        band = err if fill == "err" else stdev
+        low = [mean[(ratio, clf)] - band[(ratio, clf)] for ratio in ratios]
+        high = [mean[(ratio, clf)] + band[(ratio, clf)] for ratio in ratios]
         ax.fill_between(ratios, low, high, alpha=0.15, color=COLOURS[idx % len(COLOURS)])
 
     ax.legend(loc=9)
@@ -275,43 +270,6 @@ def plot_case_line(
         ax.set_ylim(*ylim)
     fig.tight_layout()
     return fig
-
-
-
-def plot_case_line_abs(
-    fairness_df: pd.DataFrame,
-    metric_key: str,
-    metric_label: str,
-    ratio_type: str,
-    *,
-    fill: str = "std",
-    ylim: tuple[float, float] | None = (0.0, 0.6),
-) -> plt.Figure:
-    ratios, clfs, mean, stdev, err = _case_plot_stats(fairness_df, metric_key, ratio_type, absolute=True)
-    fig, ax = plt.subplots(figsize=(9, 9))
-    ax.set_ylabel(f"|{metric_label}|")
-    ax.set_xlabel(ratio_type.upper())
-
-    for idx, clf in enumerate(clfs):
-        y = [mean[(ratio, clf)] for ratio in ratios]
-        ax.plot(ratios, y, label=clf, color=COLOURS[idx % len(COLOURS)], marker="o")
-        if fill == "err":
-            low = [mean[(ratio, clf)] - err[(ratio, clf)] for ratio in ratios]
-            high = [mean[(ratio, clf)] + err[(ratio, clf)] for ratio in ratios]
-        else:
-            low = [mean[(ratio, clf)] - stdev[(ratio, clf)] for ratio in ratios]
-            high = [mean[(ratio, clf)] + stdev[(ratio, clf)] for ratio in ratios]
-        ax.fill_between(ratios, low, high, alpha=0.15, color=COLOURS[idx % len(COLOURS)])
-
-    ax.legend(loc=9)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.set_xticks(ratios, decimal_ratio_labels(ratios), rotation=90)
-    ax.set_xlim(0, 1)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-    fig.tight_layout()
-    return fig
-
 
 
 def plot_case_nan(
@@ -359,7 +317,6 @@ def plot_case_nan(
     return fig
 
 
-
 def plot_case_line_all(
     fairness_df: pd.DataFrame,
     metric_keys: list[str],
@@ -373,42 +330,21 @@ def plot_case_line_all(
     n_rows = int(np.ceil(len(metric_keys) / n_cols))
     fig, axs = plt.subplots(n_rows, n_cols, sharex=True, sharey=True, figsize=(12, 4.5 * n_rows))
     axs = np.atleast_2d(axs)
-
-    clfs = list(pd.unique(fairness_df["clf"]))
-    ratios = sorted(pd.unique(fairness_df[ratio_type]))
-    other_ratio = "gr" if ratio_type == "ir" else "ir"
+    all_clfs = list(pd.unique(fairness_df["clf"]))
 
     for idx, metric_key in enumerate(metric_keys):
+        ratios, clfs, mean, stdev, err = _case_plot_stats(fairness_df, metric_key, ratio_type)
         ax = axs[idx // n_cols, idx % n_cols]
         label = metric_label_map.get(metric_key, metric_key)
         ax.set_ylabel(label.replace("Difference", "").strip())
         ax.axhline(0, color="black", linestyle="--", alpha=0.9, lw=1)
 
-        mean: dict[tuple[float, str], float] = {}
-        stdev: dict[tuple[float, str], float] = {}
-        err: dict[tuple[float, str], float] = {}
-        for ratio in ratios:
-            for clf in clfs:
-                subset = fairness_df[
-                    (fairness_df[ratio_type] == ratio)
-                    & (fairness_df["clf"] == clf)
-                    & (fairness_df[other_ratio] == 0.5)
-                    & (fairness_df["metric"] == metric_key)
-                    & fairness_df["value"].notna()
-                ]["value"]
-                mean[(ratio, clf)] = float(subset.mean()) if len(subset) else np.nan
-                stdev[(ratio, clf)] = float(subset.std()) if len(subset) else np.nan
-                err[(ratio, clf)] = float(scipy.stats.sem(subset, nan_policy="omit")) if len(subset) > 1 else np.nan
-
         for clf_idx, clf in enumerate(clfs):
             y = [mean[(ratio, clf)] for ratio in ratios]
             ax.plot(ratios, y, label=clf, color=COLOURS[clf_idx % len(COLOURS)], marker="o", lw=1, alpha=0.85)
-            if fill == "err":
-                low = [mean[(ratio, clf)] - err[(ratio, clf)] for ratio in ratios]
-                high = [mean[(ratio, clf)] + err[(ratio, clf)] for ratio in ratios]
-            else:
-                low = [mean[(ratio, clf)] - stdev[(ratio, clf)] for ratio in ratios]
-                high = [mean[(ratio, clf)] + stdev[(ratio, clf)] for ratio in ratios]
+            band = err if fill == "err" else stdev
+            low = [mean[(ratio, clf)] - band[(ratio, clf)] for ratio in ratios]
+            high = [mean[(ratio, clf)] + band[(ratio, clf)] for ratio in ratios]
             ax.fill_between(ratios, low, high, alpha=0.15, color=COLOURS[clf_idx % len(COLOURS)])
 
         ax.spines[["top", "right"]].set_visible(False)
@@ -422,10 +358,9 @@ def plot_case_line_all(
     for idx in range(len(metric_keys), n_rows * n_cols):
         axs[idx // n_cols, idx % n_cols].axis("off")
 
-    axs[0, 0].legend(loc=1, ncols=min(3, len(clfs)))
+    axs[0, 0].legend(loc=1, ncols=min(3, len(all_clfs)))
     fig.tight_layout()
     return fig
-
 
 
 def plot_case_grouped_bar_by_metric(
@@ -450,7 +385,6 @@ def plot_case_grouped_bar_by_metric(
     return fig
 
 
-
 def plot_case_grouped_bar_by_classifier(
     fairness_map: dict[str, dict[str, float]],
     *,
@@ -472,8 +406,6 @@ def plot_case_grouped_bar_by_classifier(
     ax.legend(handles=[mpatches.Patch(color=COLOURS[idx], label=label) for idx, label in enumerate(metric_labels)], ncol=1)
     fig.tight_layout()
     return fig
-
-
 
 
 def plot_sr_sensitivity(
@@ -520,7 +452,6 @@ def plot_histogram_grid_sr(
     show_nan_bar: bool = True,
 ) -> plt.Figure:
     """Row of histograms of *metric_key* at each given SR value."""
-    from synthetic_analysis import ensure_metric_column
     df = ensure_metric_column(df, metric_key)
     sr_values = [sv for sv in sr_values if np.isfinite(sv)]
 

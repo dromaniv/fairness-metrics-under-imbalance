@@ -125,7 +125,6 @@ def paper_ratio_sweep() -> list[float]:
     return [0.01, 0.02, 0.05] + [round(x, 2) for x in np.arange(0.1, 1.0, 0.1)] + [0.95, 0.98, 0.99]
 
 
-
 def load_adult_dataset(source: str | Path | bytes | bytearray) -> pd.DataFrame:
     """Load the Adult dataset from a path or raw uploaded bytes."""
 
@@ -152,7 +151,6 @@ def load_adult_dataset(source: str | Path | bytes | bytearray) -> pd.DataFrame:
     return df
 
 
-
 def _four_way_counts(sample_size: int, gr: float, ir: float) -> dict[tuple[str, str], int]:
     """Allocate integer cell counts while preserving the requested total size."""
 
@@ -168,7 +166,6 @@ def _four_way_counts(sample_size: int, gr: float, ir: float) -> dict[tuple[str, 
     for idx in range(remainder):
         counts[order[idx % len(order)]] += 1
     return counts
-
 
 
 def sample_adult_subset(
@@ -207,7 +204,6 @@ def sample_adult_subset(
     return sampled
 
 
-
 def preprocess_adult(
     dataset: pd.DataFrame,
     *,
@@ -239,7 +235,6 @@ def preprocess_adult(
     X_numeric = np.concatenate([X_all[numeric].to_numpy(dtype=np.float64), X_categorical], axis=1)
     feature_order = numeric + categorical
     return X_numeric, y_all, protected_values, feature_order
-
 
 
 def confusion_row_from_predictions(
@@ -281,7 +276,6 @@ def confusion_row_from_predictions(
         "j_tn": j_tn,
         "j_fn": j_fn,
     }
-
 
 
 def evaluate_case_study(
@@ -385,7 +379,6 @@ def evaluate_case_study(
     return fairness_results, performance_results
 
 
-
 def aggregate_case_results(results_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate mean and std for table display and CSV export."""
 
@@ -396,7 +389,6 @@ def aggregate_case_results(results_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["metric", "ir", "gr", "clf"])
     )
     return grouped
-
 
 
 def collect_adult_confusion_matrices(

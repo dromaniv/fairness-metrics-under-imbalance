@@ -8,8 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from metric_registry import MetricSpec, register_metric, safe_divide
-from builtin_metrics import _odds_ratio_to_q
+from metric_registry import MetricSpec, register_metric, safe_divide, odds_ratio_to_q
 
 
 def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
@@ -80,8 +79,8 @@ def conditional_q_association(df: pd.DataFrame, smoothing: bool = True) -> np.nd
     d0 = np.asarray(df["j_tn"], dtype=np.float64)
     or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
     or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
-    q1 = _odds_ratio_to_q(or1)
-    q0 = _odds_ratio_to_q(or0)
+    q1 = odds_ratio_to_q(or1)
+    q0 = odds_ratio_to_q(or0)
     result = np.full(len(df), np.nan, dtype=np.float64)
     valid = ~(np.isnan(q0) | np.isnan(q1))
     result[valid] = np.sqrt((q0[valid] ** 2 + q1[valid] ** 2) / 2.0)

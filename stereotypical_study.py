@@ -249,5 +249,3 @@ def proportional_sr_slice(
     mask = np.abs(sr - gr_j) <= tolerance
     return ensure_metric_columns(work[mask].reset_index(drop=True), metric_keys)
 
-
-

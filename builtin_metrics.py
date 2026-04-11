@@ -127,13 +127,6 @@ def equalized_odds_diff(df: pd.DataFrame) -> np.ndarray:
     return result
 
 
-def _odds_ratio_to_q(or_val: np.ndarray) -> np.ndarray:
-    denom = or_val + 1.0
-    out = np.full_like(or_val, np.nan, dtype=np.float64)
-    np.divide(or_val - 1.0, denom, out=out, where=denom != 0)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Stereotypical-ratio and supplementary metrics
 # ---------------------------------------------------------------------------
@@ -174,10 +167,6 @@ def stereotypical_ratio_combined(df: pd.DataFrame) -> np.ndarray:
     return out
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # FRN-wrapped metrics
 # ---------------------------------------------------------------------------
@@ -185,7 +174,7 @@ def stereotypical_ratio_combined(df: pd.DataFrame) -> np.ndarray:
 def _frn_wrap(raw_fn, bounds_fn):
     """Return a compute function that applies FRN to *raw_fn* using *bounds_fn*."""
     def _compute(df: pd.DataFrame) -> np.ndarray:
-        raw    = np.asarray(raw_fn(df), dtype=np.float64)
+        raw = np.asarray(raw_fn(df), dtype=np.float64)
         bounds = bounds_fn(df)
         return frn(raw, bounds.m_min, bounds.m_max)
     return _compute

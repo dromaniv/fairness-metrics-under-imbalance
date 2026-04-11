@@ -105,6 +105,14 @@ def compute_metrics(df: pd.DataFrame, keys: Iterable[str]) -> pd.DataFrame:
     return out
 
 
+def odds_ratio_to_q(or_val: np.ndarray) -> np.ndarray:
+    """Convert an odds-ratio array to Yule's Q: (OR - 1) / (OR + 1)."""
+    denom = or_val + 1.0
+    out = np.full_like(or_val, np.nan, dtype=np.float64)
+    np.divide(or_val - 1.0, denom, out=out, where=denom != 0)
+    return out
+
+
 def metrics_metadata_frame() -> pd.DataFrame:
     rows = []
     for spec in list_metrics():
