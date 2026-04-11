@@ -134,6 +134,49 @@ def _odds_ratio_to_q(or_val: np.ndarray) -> np.ndarray:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Stereotypical-ratio and supplementary metrics
+# ---------------------------------------------------------------------------
+
+def stereotypical_ratio(df: pd.DataFrame) -> np.ndarray:
+    """SR_p = j's share of positive predictions: (j_tp+j_fp) / total predicted positives.
+
+    SR_p = GR_j means proportional positive allocation.
+    NaN when no predicted positives exist.
+    """
+    total_pp = np.asarray(df["i_tp"] + df["i_fp"] + df["j_tp"] + df["j_fp"], dtype=np.float64)
+    j_pp = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
+    return safe_divide(j_pp, total_pp)
+
+
+def stereotypical_ratio_negative(df: pd.DataFrame) -> np.ndarray:
+    """SR_n = j's share of negative predictions: (j_tn+j_fn) / total predicted negatives.
+
+    SR_n = GR_j means proportional negative allocation.
+    NaN when no predicted negatives exist.
+    """
+    total_pn = np.asarray(df["i_tn"] + df["i_fn"] + df["j_tn"] + df["j_fn"], dtype=np.float64)
+    j_pn = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    return safe_divide(j_pn, total_pn)
+
+
+def stereotypical_ratio_combined(df: pd.DataFrame) -> np.ndarray:
+    """SR_c = √(SR_p × SR_n): geometric mean of positive and negative prediction shares.
+
+    SR_c = GR_j when both allocations are proportional.
+    NaN when either SR_p or SR_n is undefined.
+    """
+    sr_p = np.asarray(stereotypical_ratio(df), dtype=np.float64)
+    sr_n = np.asarray(stereotypical_ratio_negative(df), dtype=np.float64)
+    out = np.full(len(df), np.nan, dtype=np.float64)
+    valid = np.isfinite(sr_p) & np.isfinite(sr_n) & (sr_p >= 0) & (sr_n >= 0)
+    out[valid] = np.sqrt(sr_p[valid] * sr_n[valid])
+    return out
+
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # FRN-wrapped metrics
@@ -158,6 +201,30 @@ frn_npvd = _frn_wrap(negative_predictive_parity_diff,  npvd_bounds)
 
 def register_builtin_metrics() -> None:
     specs = [
+        MetricSpec(
+            key="stereotypical_ratio",
+            label="Stereotypical Ratio SR_p",
+            category="ratio",
+            description="SR_p: j's share of positive predictions. SR_p = GR_j means proportional allocation.",
+            formula=r"\mathrm{SR}_p = \frac{j_\mathrm{tp}+j_\mathrm{fp}}{i_\mathrm{tp}+i_\mathrm{fp}+j_\mathrm{tp}+j_\mathrm{fp}}",
+            compute=stereotypical_ratio,
+        ),
+        MetricSpec(
+            key="stereotypical_ratio_negative",
+            label="Stereotypical Ratio SR_n",
+            category="ratio",
+            description="SR_n: j's share of negative predictions. SR_n = GR_j means proportional allocation of negatives.",
+            formula=r"\mathrm{SR}_n = \frac{j_\mathrm{tn}+j_\mathrm{fn}}{i_\mathrm{tn}+i_\mathrm{fn}+j_\mathrm{tn}+j_\mathrm{fn}}",
+            compute=stereotypical_ratio_negative,
+        ),
+        MetricSpec(
+            key="stereotypical_ratio_combined",
+            label="Stereotypical Ratio SR_c",
+            category="ratio",
+            description="SR_c = √(SR_p × SR_n): geometric mean. Equals GR_j when both allocations are proportional.",
+            formula=r"\mathrm{SR}_c = \sqrt{\mathrm{SR}_p \cdot \mathrm{SR}_n}",
+            compute=stereotypical_ratio_combined,
+        ),
         MetricSpec(
             key="group_ratio_j",
             label="Group Ratio (j / total)",

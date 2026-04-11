@@ -25,10 +25,11 @@ def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def fairness_phi(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row so that positive φ means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     n1d = n11 + n10
     n0d = n01 + n00
     nd1 = n11 + n01
@@ -42,20 +43,22 @@ def fairness_phi(df: pd.DataFrame) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def marginal_q_association(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row → positive Q means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     ad = n11 * n00
     bc = n10 * n01
     return safe_divide(ad - bc, ad + bc)
 
 
 def marginal_y_association(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row → positive Y means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     sqrt_ad = np.sqrt(np.where(n11 * n00 >= 0, n11 * n00, np.nan))
     sqrt_bc = np.sqrt(np.where(n10 * n01 >= 0, n10 * n01, np.nan))
     return safe_divide(sqrt_ad - sqrt_bc, sqrt_ad + sqrt_bc)

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+from PIL import Image as _PIL_Image
+
+_PIL_Image.MAX_IMAGE_PIXELS = None  # allow large composite figures
 
 import builtin_metrics  # noqa: F401 - registers built-in metrics
 try:
@@ -16,6 +20,7 @@ else:
 from adult_case_study import (
     CLASSIFIERS,
     aggregate_case_results,
+    collect_adult_confusion_matrices,
     evaluate_case_study,
     load_adult_dataset,
     paper_ratio_sweep,
@@ -28,15 +33,48 @@ from plots import (
     plot_case_line_abs,
     plot_case_line_all,
     plot_case_nan,
+    plot_detection_power_bars,
+    plot_discrimination_sweep,
     plot_histogram_grid,
+    plot_histogram_grid_sr,
+    plot_metric_vs_sr_by_ir,
     plot_metric_vs_performance_heatmap,
     plot_probability_lines,
+    plot_sr_sensitivity,
     ratio_label,
+)
+from fairness_benchmark import (
+    benchmark_metrics,
+    sweep_discrimination,
 )
 from synthetic_analysis import (
     probability_of_nan,
     probability_of_perfect_fairness,
 )
+from stereotypical_study import (
+    compute_sr_sensitivity_stratified,
+    metric_means_by_sr_multi_ir,
+    SR_COLUMNS,
+    SR_LABELS,
+)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_sr_sensitivity_stratified(df: pd.DataFrame, metric_keys: tuple[str, ...], sr_col: str) -> pd.DataFrame:
+    """Cache stratified sensitivity so switching unrelated widgets doesn't recompute it."""
+    return compute_sr_sensitivity_stratified(df, list(metric_keys), sr_col=sr_col)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_metric_means_by_sr_multi_ir(
+    df: pd.DataFrame,
+    metric_key: str,
+    ir_values: tuple[float, ...],
+    sr_col: str,
+    gr_value: float,
+    atol: float,
+) -> pd.DataFrame:
+    return metric_means_by_sr_multi_ir(df, metric_key, list(ir_values), sr_col=sr_col, gr_value=gr_value, atol=atol)
 from synthetic_data import (
     add_base_columns,
     count_confusion_matrices,
@@ -47,6 +85,7 @@ from synthetic_data import (
     ratio_values,
     sample_uniform_confusion_matrices,
 )
+
 
 
 st.set_page_config(page_title="Fairness Measures Explorer", layout="wide", page_icon="⚖️")
@@ -148,7 +187,9 @@ def dataframe_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def figure_png_bytes(fig) -> bytes:
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
+    w, h = fig.get_size_inches()
+    dpi = max(72, min(150, int((100_000_000 / max(w * h, 1)) ** 0.5)))
+    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight")
     buffer.seek(0)
     return buffer.read()
 
@@ -167,6 +208,265 @@ def metric_selector(label: str, category: str, default_keys: list[str] | None = 
     label_map = {spec.key: spec.label for spec in specs}
     default = [k for k in (default_keys or options) if k in options]
     return st.multiselect(label, options=options, default=default, format_func=lambda key: label_map[key])
+
+
+def render_fairness_benchmark_page() -> None:
+    st.header("Fairness detection benchmark")
+    st.write(
+        "Pick a discrimination type, inject a controlled gap \u03b4 into synthetic confusion matrices, "
+        "and see **exactly what score each metric produces** \u2014 from perfectly fair (\u03b4\u00a0=\u00a00) "
+        "to strongly discriminating."
+    )
+
+    _prog_bar = st.empty()
+    _prog_cap = st.empty()
+
+    with st.sidebar:
+        st.subheader("Benchmark setup")
+        bench_n = int(st.number_input("n (total samples)", min_value=20, value=200, step=20, key="bench_n"))
+        bench_ir = st.slider("Imbalance ratio (IR)", 0.05, 0.95, 0.5, 0.05, key="bench_ir",
+                             help="Overall positive-class fraction. Both groups share this base rate.")
+        bench_gr = st.slider("Group ratio (GR)", 0.05, 0.95, 0.5, 0.05, key="bench_gr",
+                             help="j-group's fraction of total samples.")
+        bench_disc_type = st.radio(
+            "Discrimination type",
+            options=["tpr_gap", "fpr_gap", "both"],
+            format_func=lambda v: {
+                "tpr_gap": "TPR gap  (j recall \u2212 i recall = \u03b4)",
+                "fpr_gap": "FPR gap  (j false-alarm \u2212 i false-alarm = \u03b4)",
+                "both":    "Both     (TPR gap = FPR gap = \u03b4)",
+            }[v],
+            key="bench_disc_type",
+        )
+        bench_max_delta = st.slider("Max |\u03b4| for inner steps", 0.1, 0.9, 0.8, 0.05, key="bench_max_delta",
+                                    help="9 steps from \u2212max to +max, plus forced \u00b10.99 extremes (11 columns total).")
+        bench_seed = int(st.number_input("Random seed", min_value=0, value=2137, step=1, key="bench_seed"))
+
+        if st.button("Run benchmark", type="primary", key="bench_run"):
+            try:
+                _prog_bar.progress(0.05, text="Generating confusion matrices\u2026")
+                _prog_cap.caption("Injecting discrimination and computing metrics\u2026")
+                # 9 inner steps (nice round numbers) + forced ±0.99 extremes = 11 columns.
+                inner = np.linspace(-bench_max_delta, bench_max_delta, 9).tolist()
+                delta_values = sorted({round(d, 10) for d in inner + [-0.99, 0.99]})
+                all_fairness_keys = [s.key for s in fairness_metric_specs()]
+                df = sweep_discrimination(
+                    bench_n, bench_ir, bench_gr,
+                    delta_values, bench_disc_type,
+                    400, all_fairness_keys, bench_seed,
+                )
+                _prog_bar.progress(1.0, text="Done.")
+                _prog_bar.empty()
+                _prog_cap.empty()
+                if df.empty:
+                    raise ValueError("No matrices could be generated for these parameters.")
+                st.session_state["fairness_benchmark_df"] = df
+                st.session_state["fairness_benchmark_params"] = {
+                    "n": bench_n, "ir": bench_ir, "gr": bench_gr,
+                    "disc_type": bench_disc_type, "max_delta": bench_max_delta,
+                    "seed": bench_seed,
+                }
+                st.success(f"Ready \u2014 {len(df):,} rows across 9 \u03b4 values.")
+            except Exception as exc:
+                _prog_bar.empty()
+                _prog_cap.empty()
+                st.error(str(exc))
+
+    df: pd.DataFrame | None = st.session_state.get("fairness_benchmark_df")
+    if df is None:
+        st.info("Configure the benchmark in the sidebar and click **Run benchmark**.")
+        return
+
+    params: dict = st.session_state.get("fairness_benchmark_params", {})
+    disc_type_used: str = params.get("disc_type", "tpr_gap")
+
+    fairness_specs = fairness_metric_specs()
+    fairness_label_map = {s.key: s.label for s in fairness_specs}
+    available_keys = [s.key for s in fairness_specs if s.key in df.columns]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("n", params.get("n", "?"))
+    c2.metric("IR", f"{params.get('ir', 0.5):.2f}")
+    c3.metric("GR", f"{params.get('gr', 0.5):.2f}")
+    c4.metric("Discrimination", {"tpr_gap": "TPR gap", "fpr_gap": "FPR gap", "both": "Both"}.get(disc_type_used, disc_type_used))
+
+    # ── At-a-glance scores ────────────────────────────────────────────────────
+    st.subheader("Real scores at each discrimination level")
+    st.caption(
+        "Mean metric value across 400 random base-rate draws per \u03b4. "
+        "Each cell is literally **what the metric reads** when that much discrimination is injected. "
+        "The centre column (\u03b4\u00a0=\u00a00.00) is the fair baseline \u2014 all metrics should read near 0 there."
+    )
+
+    col_left, col_right = st.columns([3, 1])
+    table_metric_keys = col_left.multiselect(
+        "Metrics in table",
+        options=available_keys,
+        default=available_keys,
+        format_func=lambda k: fairness_label_map.get(k, k),
+        key="bench_table_metrics",
+    )
+    table_abs = col_right.checkbox(
+        "Show absolute values", value=False, key="bench_table_abs",
+        help="Collapses direction \u2014 useful when you care about magnitude only.",
+    )
+
+    if table_metric_keys:
+        deltas_sorted = sorted(df["true_delta"].unique())
+        pivot_rows: dict[str, dict] = {}
+        for key in table_metric_keys:
+            label = fairness_label_map.get(key, key)
+            row: dict = {}
+            for d in deltas_sorted:
+                vals = df.loc[df["true_delta"] == d, key].dropna()
+                if table_abs:
+                    vals = vals.abs()
+                row[f"{d:+.2f}"] = float(vals.mean()) if len(vals) else np.nan
+            pivot_rows[label] = row
+
+        pivot_df = pd.DataFrame(pivot_rows).T
+        pivot_df.index.name = "Metric"
+
+        vmax = float(max(0.01, pivot_df.abs().max(skipna=True).max(skipna=True)))
+        if table_abs:
+            styled = (
+                pivot_df.style
+                .background_gradient(cmap="YlOrRd", vmin=0.0, vmax=vmax, axis=None)
+                .format("{:.3f}")
+                .set_properties(**{"text-align": "center", "font-size": "13px"})
+            )
+        else:
+            styled = (
+                pivot_df.style
+                .background_gradient(cmap="coolwarm", vmin=-vmax, vmax=vmax, axis=None)
+                .format("{:.3f}")
+                .set_properties(**{"text-align": "center", "font-size": "13px"})
+            )
+        st.dataframe(styled, use_container_width=True)
+        st.caption(
+            "\U0001f7e6 positive (j favoured) \u00b7 \u26aa near-zero (fair) \u00b7 \U0001f7e5 negative (j disadvantaged)  \n"
+            "\u26a0\ufe0f **CQA / CYA** are unsigned (always \u2265\u00a00) and cap at **1/\u221a2 \u2248 0.707** "
+            "under `TPR gap` or `FPR gap` mode because only one decision stratum is discriminated "
+            "(the other has OR\u00a0=\u00a01 \u2192 Q\u00a0=\u00a00). "
+            "Switch to **Both** to let both strata discriminate and reach 1.0.  \n"
+            "\u26a0\ufe0f **MI / NMI** are also unsigned. **PED = 0** under TPR gap (FPR equalized by design). "
+            "**DIR** is centred at 1\u00a0(fair), not 0 \u2014 use **log DIR** for a zero-centred reading."
+        )
+        st.download_button(
+            "Download scores table CSV",
+            data=pivot_df.to_csv().encode("utf-8"),
+            file_name="benchmark_scores_table.csv",
+            mime="text/csv",
+        )
+
+    st.divider()
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tabs = st.tabs(["Response curves", "Detection power"])
+
+    # ── Tab 0 : Response curves ───────────────────────────────────────────────
+    with tabs[0]:
+        st.subheader("Metric response curves")
+        st.caption(
+            "Mean \u00b1\u202fstd across base-rate draws at each \u03b4. "
+            "A sensitive metric rises steeply from zero \u2014 "
+            "a flat line means it misses the discrimination entirely."
+        )
+        col1, col2 = st.columns([3, 1])
+        curve_metric_keys = col1.multiselect(
+            "Metrics",
+            options=available_keys,
+            default=available_keys,
+            format_func=lambda k: fairness_label_map.get(k, k),
+            key="bench_curve_metrics",
+        )
+        col2.write("")  # spacer
+        col2.write("")
+        curve_abs = col2.checkbox("Absolute values", value=False, key="bench_curve_abs")
+
+        if curve_metric_keys:
+            fig_signed = plot_discrimination_sweep(
+                df, curve_metric_keys, fairness_label_map, disc_type_used, absolute=False,
+            )
+            fig_abs = plot_discrimination_sweep(
+                df, curve_metric_keys, fairness_label_map, disc_type_used, absolute=True,
+            )
+            left, right = st.columns(2)
+            left.pyplot(fig_signed, use_container_width=True)
+            right.pyplot(fig_abs, use_container_width=True)
+            st.download_button(
+                "Download curves CSV",
+                data=dataframe_csv_bytes(df[["true_delta"] + curve_metric_keys].dropna(how="all")),
+                file_name="benchmark_curves.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("Select at least one metric.")
+
+    # ── Tab 1 : Detection power ───────────────────────────────────────────────
+    with tabs[1]:
+        st.subheader("Detection power & false alarm rate")
+        st.caption(
+            "**Detection power** = P(|metric|\u00a0>\u00a0\u03c4\u00a0|\u00a0discrimination injected). "
+            "**False alarm rate** = P(|metric|\u00a0>\u00a0\u03c4\u00a0|\u00a0\u03b4\u00a0=\u00a00, no discrimination). "
+            "A useful metric scores high on the first and near-zero on the second."
+        )
+        col1, col2, col3 = st.columns([1, 1, 2])
+        det_threshold = col1.slider(
+            "Detection threshold \u03c4", 0.0, 0.5, 0.05, 0.01, key="bench_det_threshold",
+            help="Flag a case as discriminating when |metric| > \u03c4.",
+        )
+        det_null_eps = float(col2.number_input(
+            "Fair zone |\u03b4| \u2264 \u03b5", min_value=0.0, max_value=0.2,
+            value=0.01, step=0.005, format="%.3f", key="bench_det_null_eps",
+            help="Rows with |true_delta| \u2264 \u03b5 count as the fair (null) cases.",
+        ))
+        det_metric_keys = col3.multiselect(
+            "Metrics", options=available_keys, default=available_keys,
+            format_func=lambda k: fairness_label_map.get(k, k), key="bench_det_metrics",
+        )
+
+        if det_metric_keys:
+            bench_df = benchmark_metrics(df, det_metric_keys, float(det_threshold), det_null_eps)
+            if bench_df.empty:
+                st.info("No results \u2014 try adjusting the threshold or fair-zone \u03b5.")
+            else:
+                fig_bars = plot_detection_power_bars(bench_df, fairness_label_map)
+                st.pyplot(fig_bars, use_container_width=True)
+
+                bench_df["label"] = bench_df["metric"].map(lambda k: fairness_label_map.get(k, k))
+                bench_df["net_gain"] = bench_df["detection_power"] - bench_df["false_alarm_rate"]
+                display_bench = (
+                    bench_df[["label", "detection_power", "false_alarm_rate", "net_gain", "spearman_r"]]
+                    .rename(columns={
+                        "label": "Metric",
+                        "detection_power": "Detection power",
+                        "false_alarm_rate": "False alarm rate",
+                        "net_gain": "Net gain (power \u2212 alarm)",
+                        "spearman_r": "Spearman \u03c1 vs \u03b4",
+                    })
+                    .sort_values("Net gain (power \u2212 alarm)", ascending=False)
+                    .reset_index(drop=True)
+                )
+                st.dataframe(
+                    display_bench.style.format({
+                        "Detection power": "{:.3f}",
+                        "False alarm rate": "{:.3f}",
+                        "Net gain (power \u2212 alarm)": "{:.3f}",
+                        "Spearman \u03c1 vs \u03b4": "{:.3f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download detection table CSV",
+                    data=dataframe_csv_bytes(display_bench),
+                    file_name="benchmark_detection_power.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.info("Select at least one metric.")
+
 
 
 def render_metric_registry_page() -> None:
@@ -528,12 +828,14 @@ def render_case_study_page() -> None:
         st.subheader("Adult data source")
         default_path = "data/adult.data"
         adult_source_mode = st.radio("Adult dataset source", options=["Local path", "Upload file"], key="adult_source_mode")
-        uploaded = None
-        path_value = default_path
-        if adult_source_mode == "Upload file":
-            uploaded = st.file_uploader("adult.data", type=["data", "csv", "txt"], key="adult_upload")
-        else:
-            path_value = st.text_input("Path to adult.data", value=default_path, key="adult_path")
+        uploaded = (
+            st.file_uploader("adult.data", type=["data", "csv", "txt"], key="adult_upload")
+            if adult_source_mode == "Upload file" else None
+        )
+        path_value = (
+            st.text_input("Path to adult.data", value=default_path, key="adult_path")
+            if adult_source_mode == "Local path" else default_path
+        )
 
         st.subheader("Experiment controls")
         sweep_ratios = st.multiselect(
@@ -735,16 +1037,393 @@ def render_case_study_page() -> None:
         )
 
 
+def render_stereotypical_page() -> None:
+    st.header("Stereotypical bias study")
+    st.write(
+        "Explore how the Stereotypical Ratio correlates with fairness metrics. "
+        "Three variants: **SR_p** (j's share of positive predictions), "
+        "**SR_n** (j's share of negative predictions), "
+        "**SR_c** = √(SR_p·SR_n) (combined). SR = GR_j is the proportional baseline."
+    )
+
+    _prog_bar = st.empty()
+    _prog_cap = st.empty()
+
+    # Map display name → (column, ratio_type string for analysis functions)
+    _SR_VARIANTS: dict[str, tuple[str, str]] = {
+        "SR_p": ("stereotypical_ratio", "sr"),
+        "SR_n": ("stereotypical_ratio_negative", "sr_n"),
+        "SR_c": ("stereotypical_ratio_combined", "sr_c"),
+    }
+
+    with st.sidebar:
+        st.subheader("Stereotypical bias study")
+        data_source = st.radio("Dataset source", ["Synthetic", "Adult"], key="stereo_source")
+
+        if data_source == "Synthetic":
+            synth_mode = st.radio(
+                "Dataset mode",
+                ["Exact enumeration", "Monte Carlo sample", "Load pickle"],
+                key="stereo_synth_mode",
+            )
+            total = st.number_input("n (total samples)", min_value=1, value=24, step=1, key="stereo_n")
+            est = count_confusion_matrices(int(total))
+            st.caption(f"All possible matrices: {est:,}")
+            if est > 20_000_000:
+                st.warning("Exact generation at this n may be too heavy. Use Monte Carlo or reduce n.")
+            draws = (
+                int(st.number_input("Monte Carlo draws", min_value=100, value=200_000, step=100, key="stereo_draws"))
+                if synth_mode == "Monte Carlo sample" else 200_000
+            )
+            max_rows = int(st.number_input("Exact row cap", min_value=1000, value=20_000_000, step=1000, key="stereo_cap"))
+            pickle_path = st.text_input("Pickle path", value="", key="stereo_pickle") if synth_mode == "Load pickle" else ""
+            seed = int(st.number_input("Random seed", min_value=0, value=2137, step=1, key="stereo_seed"))
+
+            if st.button("Build synthetic dataset", type="primary", key="stereo_build"):
+                try:
+                    if synth_mode == "Exact enumeration":
+                        raw = generate_exact_confusion_matrices(int(total), max_rows=max_rows)
+                    elif synth_mode == "Monte Carlo sample":
+                        raw = sample_uniform_confusion_matrices(int(total), draws, seed=seed)
+                    else:
+                        if not pickle_path.strip():
+                            raise ValueError("Enter a pickle path first.")
+                        raw = load_confusion_matrices_from_pickle(pickle_path.strip())
+                    st.session_state["stereo_df"] = add_base_columns(raw)
+                    st.session_state["stereo_label"] = f"Synthetic (n={int(total)})"
+                    st.success("Dataset ready.")
+                except Exception as exc:
+                    st.error(str(exc))
+
+        else:  # Adult
+            adult_mode = st.radio("File source", ["Local path", "Upload file"], key="stereo_adult_mode")
+            stereo_upload = (
+                st.file_uploader("adult.data", type=["data", "csv", "txt"], key="stereo_adult_upload")
+                if adult_mode == "Upload file" else None
+            )
+            stereo_path = (
+                st.text_input("Path to adult.data", value="data/adult.data", key="stereo_adult_path")
+                if adult_mode == "Local path" else "data/adult.data"
+            )
+            sweep_ratios = st.multiselect(
+                "Ratios to sweep", options=paper_ratio_sweep(), default=paper_ratio_sweep(),
+                format_func=lambda v: f"{v:.2f}", key="stereo_sweep_ratios",
+            )
+            fixed_ratio = st.number_input("Fixed ratio", min_value=0.0, max_value=1.0, value=0.5, step=0.01, key="stereo_fixed_ratio")
+            sample_size = st.number_input("Subset size", min_value=100, value=1100, step=100, key="stereo_sample_size")
+            holdout_splits = st.number_input("Holdout splits", min_value=1, value=20, step=1, key="stereo_splits")
+            test_size = st.slider("Test size", min_value=0.1, max_value=0.9, value=0.33, step=0.01, key="stereo_test_size")
+            seed = int(st.number_input("Random seed", min_value=0, value=2137, step=1, key="stereo_seed"))
+            classifiers = st.multiselect(
+                "Classifiers", options=list(CLASSIFIERS.keys()), default=list(CLASSIFIERS.keys()),
+                key="stereo_classifiers",
+            )
+
+            if st.button("Collect confusion matrices", type="primary", key="stereo_run"):
+                try:
+                    if adult_mode == "Upload file":
+                        if stereo_upload is None:
+                            raise ValueError("Upload the Adult dataset first.")
+                        adult_df = load_adult_dataset(stereo_upload.getvalue())
+                    else:
+                        adult_df = load_adult_dataset(stereo_path)
+
+                    def _prog(frac: float, msg: str) -> None:
+                        _prog_bar.progress(min(frac, 1.0), text=msg)
+                        _prog_cap.caption(msg)
+
+                    raw_df = collect_adult_confusion_matrices(
+                        adult_df,
+                        ratio_values=sweep_ratios,
+                        fixed_ratio=float(fixed_ratio),
+                        sample_size=int(sample_size),
+                        holdout_splits=int(holdout_splits),
+                        test_size=float(test_size),
+                        classifier_names=classifiers,
+                        random_state=seed,
+                        progress_callback=_prog,
+                    )
+                    _prog_bar.empty()
+                    _prog_cap.empty()
+                    st.session_state["stereo_df"] = add_base_columns(raw_df)
+                    st.session_state["stereo_label"] = "Adult"
+                    st.success(f"Collected {len(raw_df):,} confusion matrices.")
+                except Exception as exc:
+                    st.error(str(exc))
+
+    df: pd.DataFrame | None = st.session_state.get("stereo_df")
+    if df is None:
+        st.info("Build a dataset from the sidebar to begin.")
+        return
+
+    if "stereotypical_ratio" not in df.columns:
+        df = add_base_columns(df.copy())
+        st.session_state["stereo_df"] = df
+
+    dataset_label: str = st.session_state.get("stereo_label", "Unknown")
+    available_ir = sorted(pd.unique(df["imbalance_ratio"].dropna()))
+    available_gr = sorted(pd.unique(df["group_ratio_j"].dropna()))
+    # Pre-compute available values for each SR variant
+    all_avail_sr: dict[str, list[float]] = {
+        col: sorted(v for v in pd.unique(df[col]) if np.isfinite(v))
+        for col in [c for _, (c, _) in _SR_VARIANTS.items() if c in df.columns]
+    }
+    available_sr_p = all_avail_sr.get("stereotypical_ratio", [])
+    default_atol = 0.015 if len(available_ir) > 20 else 0.06
+
+    fairness_specs = fairness_metric_specs()
+    fairness_label_map = {spec.key: spec.label for spec in fairness_specs}
+    all_label_map = {**fairness_label_map, **{s.key: s.label for s in list_metrics("fairness_frn")}}
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{len(df):,}")
+    c2.metric("Dataset", dataset_label)
+    c3.metric("Unique SR_p values", len(available_sr_p))
+    c4.metric("Unique IR values", len(available_ir))
+
+    tabs = st.tabs(["Histogram grids", "Metric vs SR", "Perfect fairness / NaN", "Sensitivity ranking", "Data table"])
+
+    with tabs[0]:
+        st.subheader("Histogram grids")
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        hist_metric_key = col1.selectbox(
+            "Metric", options=[s.key for s in fairness_specs],
+            format_func=lambda k: fairness_label_map[k], key="stereo_hist_metric",
+        )
+        hist_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_hist_sr_variant")
+        bins = int(col3.number_input("Histogram bins", min_value=5, value=109, step=1, key="stereo_hist_bins"))
+        show_nan_bar = col4.checkbox("Show undefined-value bar", value=True, key="stereo_hist_nan_bar")
+        hist_smoothing = smoothing_toggle(hist_metric_key, "stereo_hist_smoothing")
+        hist_frn = frn_toggle(hist_metric_key, "stereo_hist_frn")
+        active_hist_key = resolve_frn_key(hist_metric_key, hist_frn)
+        hist_sr_col, _ = _SR_VARIANTS[hist_sr_variant]
+        avail_sr_hist = all_avail_sr.get(hist_sr_col, [])
+        default_sr_panel = (
+            list(dict.fromkeys(min(avail_sr_hist, key=lambda v, t=t: abs(v - t)) for t in [0.08, 0.25, 0.5, 0.75, 0.92]))
+            if avail_sr_hist else []
+        )
+        selected_sr = sorted(st.multiselect(
+            f"{hist_sr_variant} panel values", options=avail_sr_hist,
+            default=[v for v in default_sr_panel if v in avail_sr_hist],
+            format_func=ratio_label, key=f"stereo_hist_sr_{hist_sr_variant}",
+        ))
+        if selected_sr:
+            hist_df = apply_smoothing_override(df, active_hist_key, hist_smoothing)
+            fig = plot_histogram_grid_sr(
+                hist_df, active_hist_key,
+                all_label_map.get(active_hist_key, fairness_label_map[hist_metric_key]),
+                selected_sr, sr_col=hist_sr_col, bins=bins, show_nan_bar=show_nan_bar,
+            )
+            st.pyplot(fig, use_container_width=True)
+            st.download_button(
+                "Download histogram grid (PNG)", data=figure_png_bytes(fig),
+                file_name=f"histogram_{hist_sr_variant}_{active_hist_key}.png", mime="image/png",
+            )
+        else:
+            st.info(f"Pick at least one {hist_sr_variant} value.")
+
+    with tabs[1]:
+        st.subheader("Metric vs SR")
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        line_metric_key = col1.selectbox(
+            "Metric", options=[s.key for s in fairness_specs],
+            format_func=lambda k: fairness_label_map[k], key="stereo_line_metric",
+        )
+        line_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_line_sr_variant")
+        fixed_gr = col3.selectbox(
+            "Fixed GR", options=available_gr, index=len(available_gr) // 2,
+            format_func=ratio_label, key="stereo_fixed_gr",
+        )
+        fill = col4.radio("Band", options=["std", "err"], horizontal=True, key="stereo_line_fill")
+        line_smoothing = smoothing_toggle(line_metric_key, "stereo_line_smoothing")
+        line_frn = frn_toggle(line_metric_key, "stereo_line_frn")
+        active_line_key = resolve_frn_key(line_metric_key, line_frn)
+        line_sr_col, _ = _SR_VARIANTS[line_sr_variant]
+        default_ir_lines = available_ir[:: max(1, len(available_ir) // 5)][:5]
+        sweep_ir_values = sorted(st.multiselect(
+            "IR values to compare", options=available_ir,
+            default=[v for v in default_ir_lines if v in available_ir],
+            format_func=ratio_label, key="stereo_sweep_ir",
+        ))
+        if not sweep_ir_values:
+            st.info("Select at least one IR value to compare.")
+        else:
+            line_df = apply_smoothing_override(df, active_line_key, line_smoothing)
+            multi_df = _cached_metric_means_by_sr_multi_ir(
+                line_df, active_line_key, tuple(sweep_ir_values),
+                line_sr_col, float(fixed_gr), default_atol,
+            )
+            if multi_df.empty:
+                st.info("No data for the current GR slice. Try adjusting Fixed GR.")
+            else:
+                fig1 = plot_metric_vs_sr_by_ir(
+                    multi_df, active_line_key,
+                    all_label_map.get(active_line_key, fairness_label_map[line_metric_key]),
+                    sweep_ir_values, absolute=False, show_bands=(fill == "std"),
+                    gr_value=float(fixed_gr), sr_label=line_sr_variant,
+                )
+                fig2 = plot_metric_vs_sr_by_ir(
+                    multi_df, active_line_key,
+                    all_label_map.get(active_line_key, fairness_label_map[line_metric_key]),
+                    sweep_ir_values, absolute=True, show_bands=(fill == "std"),
+                    gr_value=float(fixed_gr), sr_label=line_sr_variant,
+                )
+                left, right = st.columns(2)
+                left.pyplot(fig1, use_container_width=True)
+                right.pyplot(fig2, use_container_width=True)
+                st.download_button(
+                    "Download metric-vs-SR CSV", data=dataframe_csv_bytes(multi_df),
+                    file_name=f"metric_vs_{line_sr_variant}_{active_line_key}.csv", mime="text/csv",
+                )
+
+    with tabs[2]:
+        st.subheader("Probability of perfect fairness and undefined values")
+        col1, col2, col3, col4 = st.columns([1.4, 1, 1, 1])
+        ppf_metric_keys = col1.multiselect(
+            "Metrics", options=[s.key for s in fairness_specs],
+            default=[s.key for s in fairness_specs], format_func=lambda k: fairness_label_map[k],
+            key="stereo_ppf_metrics",
+        )
+        ppf_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_ppf_sr_variant")
+        epsilon = float(col3.number_input("Epsilon", min_value=0.0, value=0.0, step=0.001, key="stereo_ppf_eps"))
+        ppf_smoothing = (
+            st.checkbox("Haldane-Anscombe smoothing", value=True, key="stereo_ppf_smoothing")
+            if any(k in _SMOOTHABLE_METRICS for k in ppf_metric_keys) else True
+        )
+        ppf_frn = (
+            st.checkbox("Apply FRN to supported metrics", value=False, key="stereo_ppf_frn")
+            if any(k in _FRN_KEY_MAP for k in ppf_metric_keys) else False
+        )
+        active_ppf_keys = apply_frn_to_keys(ppf_metric_keys, ppf_frn)
+        _, ppf_ratio_type = _SR_VARIANTS[ppf_sr_variant]
+        if ppf_metric_keys:
+            ppf_work = df
+            for k in active_ppf_keys:
+                ppf_work = apply_smoothing_override(ppf_work, k, ppf_smoothing)
+            ppf_df = probability_of_perfect_fairness(ppf_work, active_ppf_keys, ppf_ratio_type, epsilon=epsilon)
+            nan_df = probability_of_nan(ppf_work, active_ppf_keys, ppf_ratio_type)
+            fig1 = plot_probability_lines(
+                ppf_df, active_ppf_keys, all_label_map, ppf_ratio_type,
+                title=f"Probability of perfect fairness vs {ppf_sr_variant}",
+                y_label="Probability of perfect fairness", y_max=1.0,
+            )
+            fig2 = plot_probability_lines(
+                nan_df, active_ppf_keys, all_label_map, ppf_ratio_type,
+                title=f"Probability of undefined values vs {ppf_sr_variant}",
+                y_label="Probability of undefined value", y_max=1.0,
+            )
+            left, right = st.columns(2)
+            left.pyplot(fig1, use_container_width=True)
+            right.pyplot(fig2, use_container_width=True)
+            st.download_button(
+                "Download perfect-fairness CSV", data=dataframe_csv_bytes(ppf_df),
+                file_name=f"{ppf_sr_variant}_perfect_fairness.csv", mime="text/csv",
+            )
+            st.download_button(
+                "Download undefined-value CSV", data=dataframe_csv_bytes(nan_df),
+                file_name=f"{ppf_sr_variant}_undefined_probability.csv", mime="text/csv",
+            )
+
+    with tabs[3]:
+        st.subheader("Sensitivity ranking")
+        st.write(
+            "**Stratified** Spearman ρ: correlation is computed within each (IR, GR) stratum, "
+            "then combined via Fisher Z-weighting."
+        )
+        all_fairness_keys = [s.key for s in fairness_specs]
+        sens_work = df.copy()
+        for k in all_fairness_keys:
+            if k in _SMOOTHABLE_METRICS:
+                sens_work = apply_smoothing_override(sens_work, k, True)
+
+        sens_dfs: dict[str, pd.DataFrame] = {
+            variant: _cached_sr_sensitivity_stratified(sens_work, tuple(all_fairness_keys), col)
+            for variant, (col, _) in _SR_VARIANTS.items()
+            if col in sens_work.columns
+        }
+
+        any_data = any(not d.empty and not d["spearman_r"].isna().all() for d in sens_dfs.values())
+        if not any_data:
+            st.info("Not enough data to compute sensitivity statistics.")
+        else:
+            sens_cols = st.columns(len(sens_dfs))
+            for idx, (variant, sens_df) in enumerate(sens_dfs.items()):
+                with sens_cols[idx]:
+                    st.markdown(f"**{variant}**")
+                    if sens_df.empty or sens_df["spearman_r"].isna().all():
+                        st.info("No data.")
+                    else:
+                        fig_rho = plot_sr_sensitivity(
+                            sens_df, fairness_label_map,
+                            value_col="spearman_r",
+                            title=f"Stratified ρ vs {variant}",
+                        )
+                        st.pyplot(fig_rho, use_container_width=True)
+
+            st.subheader("Combined |ρ| table — all SR variants")
+            tbl_rows = []
+            for key in all_fairness_keys:
+                row: dict = {"Metric": fairness_label_map.get(key, key)}
+                for variant, sens_df in sens_dfs.items():
+                    match = sens_df[sens_df["metric"] == key]
+                    rho = float(abs(match["spearman_r"].iloc[0])) if not match.empty and match["spearman_r"].notna().any() else np.nan
+                    row[f"|ρ| {variant}"] = rho
+                tbl_rows.append(row)
+            combined_tbl = pd.DataFrame(tbl_rows)
+            sort_col = next((f"|ρ| {v}" for v in _SR_VARIANTS if f"|ρ| {v}" in combined_tbl.columns), "Metric")
+            combined_tbl = combined_tbl.sort_values(sort_col, ascending=True)
+            st.dataframe(combined_tbl, use_container_width=True, hide_index=True)
+            st.caption(
+                "Most SR-resistant metric = lowest |ρ| across all three variants. "
+                "A metric is robustly resistant only if it scores low on SR_p, SR_n **and** SR_c."
+            )
+            st.download_button(
+                "Download sensitivity CSV", data=dataframe_csv_bytes(combined_tbl),
+                file_name="sr_sensitivity_stratified.csv", mime="text/csv",
+            )
+
+    with tabs[4]:
+        st.subheader("Data table")
+        preview_keys = st.multiselect(
+            "Additional metric columns", options=[s.key for s in fairness_specs],
+            default=[], format_func=lambda k: fairness_label_map.get(k, k), key="stereo_preview_metrics",
+        )
+        hide_degen = st.checkbox("Hide rows where either group is empty", value=True, key="stereo_hide_degen")
+        tbl = df.copy()
+        if hide_degen:
+            i_tot = tbl["i_tp"] + tbl["i_fp"] + tbl["i_tn"] + tbl["i_fn"]
+            j_tot = tbl["j_tp"] + tbl["j_fp"] + tbl["j_tn"] + tbl["j_fn"]
+            tbl = tbl[(i_tot > 0) & (j_tot > 0)].reset_index(drop=True)
+        base_cols = [c for c in list(COUNT_COLUMNS) + [
+            "stereotypical_ratio", "stereotypical_ratio_negative", "stereotypical_ratio_combined",
+            "imbalance_ratio", "group_ratio_j",
+        ] if c in tbl.columns]
+        display_tbl = (
+            pd.concat([tbl[base_cols].reset_index(drop=True), compute_metrics(tbl, preview_keys).reset_index(drop=True)], axis=1)
+            if preview_keys else tbl[base_cols].copy()
+        )
+        st.caption(f"Showing {min(1000, len(display_tbl)):,} of {len(display_tbl):,} rows.")
+        st.dataframe(display_tbl.head(1000), use_container_width=True)
+
+
 st.title("Fairness Measures Explorer")
 st.caption(
     "Interactive Streamlit recreation of the synthetic analyses and Adult case study from the provided fairness-measure repository."
 )
 
-page = st.radio("Workflow", options=["Synthetic study", "Adult case study", "Metric registry"], horizontal=True)
+page = st.radio(
+    "Workflow",
+    options=["Synthetic study", "Adult case study", "Stereotypical bias study", "Fairness benchmark", "Metric registry"],
+    horizontal=True,
+)
 
 if page == "Synthetic study":
     render_synthetic_page()
 elif page == "Adult case study":
     render_case_study_page()
+elif page == "Stereotypical bias study":
+    render_stereotypical_page()
+elif page == "Fairness benchmark":
+    render_fairness_benchmark_page()
 else:
     render_metric_registry_page()

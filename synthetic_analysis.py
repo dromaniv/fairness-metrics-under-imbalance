@@ -14,12 +14,18 @@ def resolve_ratio_column(ratio_type: str, group_ratio_basis: str = "j") -> str:
     ratio_type = ratio_type.lower()
     if ratio_type == "ir":
         return "imbalance_ratio"
+    if ratio_type == "sr":
+        return "stereotypical_ratio"
+    if ratio_type == "sr_n":
+        return "stereotypical_ratio_negative"
+    if ratio_type == "sr_c":
+        return "stereotypical_ratio_combined"
     if ratio_type == "gr":
         basis = group_ratio_basis.lower()
         if basis not in {"i", "j"}:
             raise ValueError("group_ratio_basis must be 'i' or 'j'")
         return f"group_ratio_{basis}"
-    raise ValueError("ratio_type must be 'ir' or 'gr'")
+    raise ValueError("ratio_type must be 'ir', 'gr', 'sr', 'sr_n', or 'sr_c'")
 
 
 def ensure_metric_column(df: pd.DataFrame, metric_key: str) -> pd.DataFrame:

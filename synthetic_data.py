@@ -11,7 +11,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from builtin_metrics import accuracy, g_mean, group_ratio_i, group_ratio_j, imbalance_ratio
+from builtin_metrics import accuracy, g_mean, group_ratio_i, group_ratio_j, imbalance_ratio, stereotypical_ratio, stereotypical_ratio_negative, stereotypical_ratio_combined
 from metric_registry import COUNT_COLUMNS, compute_metrics
 
 
@@ -164,6 +164,9 @@ def add_base_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["group_ratio_j"] = np.asarray(group_ratio_j(out), dtype=np.float32)
     out["group_ratio_i"] = np.asarray(group_ratio_i(out), dtype=np.float32)
     out["imbalance_ratio"] = np.asarray(imbalance_ratio(out), dtype=np.float32)
+    out["stereotypical_ratio"] = np.asarray(stereotypical_ratio(out), dtype=np.float32)
+    out["stereotypical_ratio_negative"] = np.asarray(stereotypical_ratio_negative(out), dtype=np.float32)
+    out["stereotypical_ratio_combined"] = np.asarray(stereotypical_ratio_combined(out), dtype=np.float32)
     out["accuracy"] = np.asarray(accuracy(out), dtype=np.float32)
     out["g_mean"] = np.asarray(g_mean(out), dtype=np.float32)
     return out
