@@ -247,4 +247,3 @@ def frn(raw: np.ndarray, m_min: np.ndarray, m_max: np.ndarray) -> np.ndarray:
 
     return out
 
-

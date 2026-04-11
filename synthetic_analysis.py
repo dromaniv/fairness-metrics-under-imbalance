@@ -14,12 +14,18 @@ def resolve_ratio_column(ratio_type: str, group_ratio_basis: str = "j") -> str:
     ratio_type = ratio_type.lower()
     if ratio_type == "ir":
         return "imbalance_ratio"
+    if ratio_type == "sr":
+        return "stereotypical_ratio"
+    if ratio_type == "sr_n":
+        return "stereotypical_ratio_negative"
+    if ratio_type == "sr_c":
+        return "stereotypical_ratio_combined"
     if ratio_type == "gr":
         basis = group_ratio_basis.lower()
         if basis not in {"i", "j"}:
             raise ValueError("group_ratio_basis must be 'i' or 'j'")
         return f"group_ratio_{basis}"
-    raise ValueError("ratio_type must be 'ir' or 'gr'")
+    raise ValueError("ratio_type must be 'ir', 'gr', 'sr', 'sr_n', or 'sr_c'")
 
 
 def ensure_metric_column(df: pd.DataFrame, metric_key: str) -> pd.DataFrame:
@@ -41,7 +47,6 @@ def ratio_mask(series: pd.Series, value: float, atol: float = 1e-9) -> np.ndarra
     return np.isclose(series.to_numpy(dtype=np.float64), float(value), atol=atol, rtol=0.0)
 
 
-
 def select_histogram_slice(
     df: pd.DataFrame,
     metric_key: str,
@@ -60,7 +65,6 @@ def select_histogram_slice(
     for value in ir_values:
         ir_mask |= ratio_mask(out[ir_col], value)
     return out.loc[gr_mask & ir_mask].copy()
-
 
 
 def probability_of_perfect_fairness(
@@ -91,7 +95,6 @@ def probability_of_perfect_fairness(
     return pd.DataFrame(rows)
 
 
-
 def probability_of_nan(
     df: pd.DataFrame,
     metric_keys: Iterable[str],
@@ -110,7 +113,6 @@ def probability_of_nan(
             row[key] = float(group[key].isna().mean())
         rows.append(row)
     return pd.DataFrame(rows)
-
 
 
 def value_grid_for_heatmap(

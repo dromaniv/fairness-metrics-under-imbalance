@@ -8,8 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from metric_registry import MetricSpec, register_metric, safe_divide
-from builtin_metrics import _odds_ratio_to_q
+from metric_registry import MetricSpec, register_metric, safe_divide, odds_ratio_to_q
 
 
 def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
@@ -25,10 +24,11 @@ def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def fairness_phi(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row so that positive φ means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     n1d = n11 + n10
     n0d = n01 + n00
     nd1 = n11 + n01
@@ -42,20 +42,22 @@ def fairness_phi(df: pd.DataFrame) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def marginal_q_association(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row → positive Q means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     ad = n11 * n00
     bc = n10 * n01
     return safe_divide(ad - bc, ad + bc)
 
 
 def marginal_y_association(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
+    # j-group in the "1" row → positive Y means j is favoured (j−i convention).
+    n11 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)  # j pos-pred
+    n10 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)  # i pos-pred
+    n01 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)  # j neg-pred
+    n00 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)  # i neg-pred
     sqrt_ad = np.sqrt(np.where(n11 * n00 >= 0, n11 * n00, np.nan))
     sqrt_bc = np.sqrt(np.where(n10 * n01 >= 0, n10 * n01, np.nan))
     return safe_divide(sqrt_ad - sqrt_bc, sqrt_ad + sqrt_bc)
@@ -77,8 +79,8 @@ def conditional_q_association(df: pd.DataFrame, smoothing: bool = True) -> np.nd
     d0 = np.asarray(df["j_tn"], dtype=np.float64)
     or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
     or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
-    q1 = _odds_ratio_to_q(or1)
-    q0 = _odds_ratio_to_q(or0)
+    q1 = odds_ratio_to_q(or1)
+    q0 = odds_ratio_to_q(or0)
     result = np.full(len(df), np.nan, dtype=np.float64)
     valid = ~(np.isnan(q0) | np.isnan(q1))
     result[valid] = np.sqrt((q0[valid] ** 2 + q1[valid] ** 2) / 2.0)

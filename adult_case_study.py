@@ -125,7 +125,6 @@ def paper_ratio_sweep() -> list[float]:
     return [0.01, 0.02, 0.05] + [round(x, 2) for x in np.arange(0.1, 1.0, 0.1)] + [0.95, 0.98, 0.99]
 
 
-
 def load_adult_dataset(source: str | Path | bytes | bytearray) -> pd.DataFrame:
     """Load the Adult dataset from a path or raw uploaded bytes."""
 
@@ -152,7 +151,6 @@ def load_adult_dataset(source: str | Path | bytes | bytearray) -> pd.DataFrame:
     return df
 
 
-
 def _four_way_counts(sample_size: int, gr: float, ir: float) -> dict[tuple[str, str], int]:
     """Allocate integer cell counts while preserving the requested total size."""
 
@@ -168,7 +166,6 @@ def _four_way_counts(sample_size: int, gr: float, ir: float) -> dict[tuple[str, 
     for idx in range(remainder):
         counts[order[idx % len(order)]] += 1
     return counts
-
 
 
 def sample_adult_subset(
@@ -207,7 +204,6 @@ def sample_adult_subset(
     return sampled
 
 
-
 def preprocess_adult(
     dataset: pd.DataFrame,
     *,
@@ -239,7 +235,6 @@ def preprocess_adult(
     X_numeric = np.concatenate([X_all[numeric].to_numpy(dtype=np.float64), X_categorical], axis=1)
     feature_order = numeric + categorical
     return X_numeric, y_all, protected_values, feature_order
-
 
 
 def confusion_row_from_predictions(
@@ -281,7 +276,6 @@ def confusion_row_from_predictions(
         "j_tn": j_tn,
         "j_fn": j_fn,
     }
-
 
 
 def evaluate_case_study(
@@ -385,7 +379,6 @@ def evaluate_case_study(
     return fairness_results, performance_results
 
 
-
 def aggregate_case_results(results_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate mean and std for table display and CSV export."""
 
@@ -396,3 +389,85 @@ def aggregate_case_results(results_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["metric", "ir", "gr", "clf"])
     )
     return grouped
+
+
+def collect_adult_confusion_matrices(
+    adult_df: pd.DataFrame,
+    *,
+    ratio_values: Iterable[float] | None = None,
+    fixed_ratio: float = 0.5,
+    sample_size: int = 1100,
+    holdout_splits: int = 20,
+    test_size: float = 0.33,
+    classifier_names: Iterable[str] | None = None,
+    protected_col: str = "sex",
+    protected_value: str = "Female",
+    target_col: str = "income",
+    positive_label: str = ">50K",
+    random_state: int = 2137,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> pd.DataFrame:
+    """Collect raw confusion-matrix rows from real classifiers on the Adult dataset.
+
+    Returns a DataFrame with the 8 confusion-matrix count columns plus
+    ``gr``, ``ir``, and ``clf``.  Pass the result to ``add_base_columns``
+    to get imbalance_ratio, stereotypical_ratio, etc.
+    """
+    if ratio_values is None:
+        ratio_values = paper_ratio_sweep()
+    if classifier_names is None:
+        classifier_names = list(CLASSIFIERS.keys())
+
+    classifier_names = list(classifier_names)
+    ratios = (
+        [(fixed_ratio, float(ir)) for ir in ratio_values]
+        + [(float(gr), fixed_ratio) for gr in ratio_values]
+    )
+    holdout = ShuffleSplit(n_splits=holdout_splits, test_size=test_size, random_state=random_state)
+
+    rows: list[dict] = []
+    total = len(ratios)
+    for step, (gr, ir) in enumerate(ratios):
+        if progress_callback is not None:
+            progress_callback(step / total, f"GR={gr:.2f} IR={ir:.2f}  ({step + 1}/{total})")
+        try:
+            subset = sample_adult_subset(
+                adult_df,
+                sample_size=sample_size,
+                gr=gr,
+                ir=ir,
+                protected_col=protected_col,
+                protected_value=protected_value,
+                target_col=target_col,
+                positive_label=positive_label,
+                random_state=random_state,
+            )
+        except ValueError:
+            continue
+        X_all, y_all, protected_values, _ = preprocess_adult(
+            subset, target_col=target_col, protected_col=protected_col,
+        )
+        for train_idx, test_idx in holdout.split(X_all):
+            X_train, X_test = X_all[train_idx], X_all[test_idx]
+            y_train, y_test = y_all[train_idx], y_all[test_idx]
+            protected_test = protected_values[test_idx]
+            for clf_name in classifier_names:
+                spec = CLASSIFIERS[clf_name]
+                try:
+                    pipe = make_pipeline(KNNImputer(), StandardScaler(), spec.builder(random_state))
+                    pipe.fit(X_train, y_train)
+                    y_pred = pipe.predict(X_test)
+                except Exception:
+                    continue
+                conf = confusion_row_from_predictions(
+                    y_test, y_pred, protected_test,
+                    protected_value=protected_value, positive_class=1,
+                )
+                conf["gr"] = gr
+                conf["ir"] = ir
+                conf["clf"] = clf_name
+                rows.append(conf)
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
+    return pd.DataFrame(rows)
