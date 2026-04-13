@@ -107,59 +107,6 @@ def conditional_y_association(df: pd.DataFrame, smoothing: bool = True) -> np.nd
     return result
 
 
-# ---------------------------------------------------------------------------
-# Mutual Information
-# ---------------------------------------------------------------------------
-
-def mutual_information(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
-    N = n11 + n10 + n01 + n00
-    n1d = n11 + n10
-    n0d = n01 + n00
-    nd1 = n11 + n01
-    nd0 = n10 + n00
-
-    def _term(n_ys, n_y, n_s):
-        denom = n_y * n_s
-        ratio = np.where((n_ys > 0) & (denom > 0), safe_divide(N * n_ys, denom), np.nan)
-        log_r = np.where(np.isfinite(ratio) & (ratio > 0), np.log(ratio), 0.0)
-        return np.where(n_ys > 0, safe_divide(n_ys, N) * log_r, 0.0)
-
-    result = _term(n11, n1d, nd1) + _term(n10, n1d, nd0) + _term(n01, n0d, nd1) + _term(n00, n0d, nd0)
-    return np.where(N > 0, result, np.nan).astype(np.float64)
-
-
-# ---------------------------------------------------------------------------
-# Normalized Mutual Information
-# ---------------------------------------------------------------------------
-
-def _binary_entropy(p: np.ndarray) -> np.ndarray:
-    p = np.asarray(p, dtype=np.float64)
-    out = np.full_like(p, np.nan)
-    valid = (p >= 0) & (p <= 1)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        h = np.where(
-            (p > 0) & (p < 1),
-            -p * np.log(np.where(p > 0, p, 1.0)) - (1 - p) * np.log(np.where(1 - p > 0, 1 - p, 1.0)),
-            0.0,
-        )
-    out[valid] = h[valid]
-    return out
-
-
-def normalized_mutual_information(df: pd.DataFrame) -> np.ndarray:
-    n11 = np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64)
-    n10 = np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64)
-    n01 = np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64)
-    n00 = np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64)
-    N = n11 + n10 + n01 + n00
-    h_yhat = _binary_entropy(safe_divide(n11 + n10, N))
-    h_s    = _binary_entropy(safe_divide(n11 + n01, N))
-    return safe_divide(mutual_information(df), np.sqrt(h_yhat * h_s))
-
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -231,28 +178,3 @@ register_metric(MetricSpec(
     compute=conditional_y_association,
 ))
 
-register_metric(MetricSpec(
-    key="mutual_information",
-    label="Mutual Information",
-    category="fairness",
-    sort_order=105,
-    description=(
-        "Discrete MI(Ŷ; S) on the 2×2 table. "
-        "Zero iff Ŷ ⊥ S. Non-negative, unsigned."
-    ),
-    formula=r"\mathrm{MI}=\sum_{\hat y,s}\frac{n_{\hat y s}}{N}\log\frac{N\,n_{\hat y s}}{n_{\hat y\cdot}n_{\cdot s}}",
-    compute=mutual_information,
-))
-
-register_metric(MetricSpec(
-    key="normalized_mutual_information",
-    label="Normalized Mutual Information",
-    category="fairness",
-    sort_order=106,
-    description=(
-        "NMI = MI / sqrt(H(Ŷ)·H(S)). Scales MI to roughly [0, 1]. "
-        "NaN when either marginal entropy is zero."
-    ),
-    formula=r"\mathrm{NMI}=\frac{\mathrm{MI}(\hat Y;S)}{\sqrt{H(\hat Y)\,H(S)}}",
-    compute=normalized_mutual_information,
-))
