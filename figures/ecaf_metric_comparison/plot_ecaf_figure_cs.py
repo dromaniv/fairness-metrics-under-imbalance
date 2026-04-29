@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-ECAF publication figure  —  (a) standard  vs  (b) proposed metrics.
+ECAF publication figure — case-study version using the real Adult dataset.
 
-Four conditions per panel (all at n = 30):
+Same layout as plot_ecaf_figure.py but distributions come from real classifier
+runs (6 classifiers × 50 holdout splits) instead of full confusion-matrix
+enumeration.
+
+Three conditions (Wong 2011 colorblind-safe palette):
   • Balanced reference : IR = 0.5, GR = 0.5  (solid blue)
-  • IR skew            : IR = 0.1, GR = 0.5  (solid red)
-  • GR skew            : IR = 0.5, GR = 0.1  (dashed green)
-  • Biased classifier  : SR_p = 0.1 filtered from balanced  (dotted purple)
+  • IR skew            : IR = 0.1, GR = 0.5  (solid orange)
+  • GR skew            : IR = 0.5, GR = 0.1  (dashed teal)
 
 Run from repo root or this directory:
-    python figures/ecaf_metric_comparison/plot_ecaf_figure.py
+    python figures/ecaf_metric_comparison/plot_ecaf_figure_cs.py
 
 Outputs (same directory):
-    ecaf_ridgeline_metrics.{png,pdf,svg}
+    ecaf_ridgeline_metrics_cs.{png,pdf,svg}
 """
 
 from __future__ import annotations
@@ -29,20 +32,36 @@ from scipy.stats import gaussian_kde
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from adult_case_study import (
+    load_adult_dataset,
+    sample_adult_subset,
+    preprocess_adult,
+    confusion_row_from_predictions,
+    CLASSIFIERS,
+)
 from builtin_metrics import equal_opportunity_diff, equalized_odds_diff, statistical_parity_diff
 from custom_metrics import conditional_y_association, fairness_phi, marginal_y_association
+from sklearn.impute import KNNImputer
+from sklearn.model_selection import ShuffleSplit
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
-OUT_DIR     = Path(__file__).parent
-FIGURE_STEM = "ecaf_ridgeline_metrics"
-N_TOTAL     = 30
+ADULT_DATA_PATH = REPO_ROOT / "data" / "adult.data"
+OUT_DIR         = Path(__file__).parent
+FIGURE_STEM     = "ecaf_ridgeline_metrics_cs"
+
+SAMPLE_SIZE    = 1100
+HOLDOUT_SPLITS = 50
+TEST_SIZE      = 0.33
+RANDOM_STATE   = 2137
 
 # Wong (2011) colorblind-safe palette
 # (legend label, ir, gr, colour, linestyle)
 CONDITIONS = [
-    ("Balanced (IR=0.5, GR=0.5)",    0.5, 0.5, "#0072B2", "-"),                   # blue
-    ("IR skew (IR=0.1, GR=0.5)",     0.1, 0.5, "#E69F00", "-"),                   # orange
-    ("GR skew (IR=0.5, GR=0.1)",     0.5, 0.1, "#009E73", (0, (6, 2))),           # teal
-    ("Both skewed (IR=0.1, GR=0.1)", 0.1, 0.1, "#CC79A7", (0, (3, 1, 1, 1))),    # pink
+    ("Balanced (IR=0.5, GR=0.5)",       0.5,  0.5,  "#0072B2", "-"),                   # blue
+    ("IR skew (IR=0.1, GR=0.5)",        0.1,  0.5,  "#E69F00", "-"),                   # orange
+    ("GR skew (IR=0.5, GR=0.1)",        0.5,  0.1,  "#009E73", (0, (6, 2))),           # teal
+    ("Both skewed (IR=0.1, GR=0.1)",  0.1, 0.1, "#CC79A7", (0, (3, 1, 1, 1))),     # pink
 ]
 
 # col 0/1: [-1, 1]   col 2: [0, 1]  (sharex='col')
@@ -58,40 +77,58 @@ PROPOSED_PANELS = [
 ]
 
 
-def _enumerate_matrices(n_total: int, ir: float, gr: float) -> pd.DataFrame:
-    n_pos = round(ir * n_total)
-    n_j   = round(gr * n_total)
-    n_i   = n_total - n_j
+def _collect_confusion_matrices(
+    adult_df: pd.DataFrame,
+    ir: float,
+    gr: float,
+) -> pd.DataFrame:
+    """Run all classifiers with holdout splits for a single (ir, gr) condition."""
+    try:
+        subset = sample_adult_subset(
+            adult_df,
+            sample_size=SAMPLE_SIZE,
+            gr=gr,
+            ir=ir,
+            random_state=RANDOM_STATE,
+        )
+    except ValueError as exc:
+        print(f"  [warn] IR={ir}, GR={gr}: {exc}")
+        return pd.DataFrame()
 
-    j_min = max(0, n_pos - n_i)
-    j_max = min(n_pos, n_j)
-
-    blocks: list[np.ndarray] = []
-    for jp in range(j_min, j_max + 1):
-        ip  = n_pos - jp
-        jn  = n_j   - jp
-        i_n = n_i   - ip
-        if i_n < 0 or jn < 0:
-            continue
-        jt  = np.arange(jp  + 1, dtype=np.int16)
-        jf  = np.arange(jn  + 1, dtype=np.int16)
-        it  = np.arange(ip  + 1, dtype=np.int16)
-        if_ = np.arange(i_n + 1, dtype=np.int16)
-        JT, JF, IT, IF_ = np.meshgrid(jt, jf, it, if_, indexing="ij")
-        nr = JT.size
-        blocks.append(np.column_stack([
-            IT.ravel(), IF_.ravel(),
-            np.full(nr, i_n, np.int16) - IF_.ravel(),
-            np.full(nr, ip,  np.int16) - IT.ravel(),
-            JT.ravel(), JF.ravel(),
-            np.full(nr, jn,  np.int16) - JF.ravel(),
-            np.full(nr, jp,  np.int16) - JT.ravel(),
-        ]))
-
-    return pd.DataFrame(
-        np.vstack(blocks).astype(np.int32),
-        columns=["i_tp","i_fp","i_tn","i_fn","j_tp","j_fp","j_tn","j_fn"],
+    X_all, y_all, protected_values, _ = preprocess_adult(subset)
+    holdout = ShuffleSplit(
+        n_splits=HOLDOUT_SPLITS,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
     )
+
+    rows: list[dict] = []
+    for train_idx, test_idx in holdout.split(X_all):
+        X_train, X_test = X_all[train_idx], X_all[test_idx]
+        y_train, y_test = y_all[train_idx], y_all[test_idx]
+        prot_test       = protected_values[test_idx]
+
+        for clf_name, spec in CLASSIFIERS.items():
+            try:
+                pipe = make_pipeline(
+                    KNNImputer(),
+                    StandardScaler(),
+                    spec.builder(RANDOM_STATE),
+                )
+                pipe.fit(X_train, y_train)
+                y_pred = pipe.predict(X_test)
+            except Exception as exc:
+                print(f"  [warn] {clf_name}: {exc}")
+                continue
+            conf = confusion_row_from_predictions(
+                y_test, y_pred, prot_test,
+                protected_value="Female",
+                positive_class=1,
+            )
+            conf["clf"] = clf_name
+            rows.append(conf)
+
+    return pd.DataFrame(rows)
 
 
 def _kde(vals: np.ndarray, x_grid: np.ndarray, min_bw: float = 0.015) -> np.ndarray:
@@ -146,13 +183,21 @@ def _draw_panel(
 
 
 def main() -> None:
-    print("Enumerating confusion matrices …")
+    print("Loading Adult dataset …")
+    adult_df = load_adult_dataset(ADULT_DATA_PATH)
+    print(f"  {len(adult_df):,} rows loaded")
+
+    print("Collecting confusion matrices from real classifiers …")
     dfs: dict[tuple, pd.DataFrame] = {}
     for _lbl, ir, gr, _c, _ls in CONDITIONS:
         key = (ir, gr)
         if key not in dfs:
-            dfs[key] = _enumerate_matrices(N_TOTAL, ir, gr)
-            print(f"  IR={ir}, GR={gr}: {len(dfs[key]):,} rows")
+            print(f"  IR={ir}, GR={gr} …")
+            dfs[key] = _collect_confusion_matrices(adult_df, ir=ir, gr=gr)
+            n = len(dfs[key])
+            print(f"    → {n:,} confusion-matrix rows  "
+                  f"({len(CLASSIFIERS)} classifiers × {HOLDOUT_SPLITS} splits = "
+                  f"{len(CLASSIFIERS) * HOLDOUT_SPLITS} expected)")
 
     all_panels = [STANDARD_PANELS, PROPOSED_PANELS]
 
@@ -164,7 +209,11 @@ def main() -> None:
             entries = []
             for _lbl, ir, gr, color, ls in CONDITIONS:
                 key      = (ir, gr)
-                raw      = np.asarray(fn(dfs[key]), dtype=np.float64)
+                df       = dfs[key]
+                if df.empty:
+                    entries.append((np.zeros_like(x_grid), 1.0, color, ls))
+                    continue
+                raw      = np.asarray(fn(df), dtype=np.float64)
                 nan_frac = np.isnan(raw).mean()
                 y        = _kde(raw, x_grid)
                 entries.append((y, nan_frac, color, ls))
@@ -238,6 +287,8 @@ def main() -> None:
         kw   = {"dpi": 300} if suffix == "png" else {}
         fig.savefig(path, bbox_inches="tight", facecolor="white", **kw)
         print(f"  {path}")
+
+    print("Done.")
 
 
 if __name__ == "__main__":
