@@ -1,8 +1,8 @@
 """Analysis helpers for the stereotypical bias study.
 
-SR_p = fraction of positive predictions assigned to group j (positive stereotypical ratio).
-SR_n = fraction of negative predictions assigned to group j (negative stereotypical ratio).
-SR_c = √(SR_p × SR_n) — geometric mean (combined stereotypical ratio).
+SR_p = j's share of the actual positive class (TP+FN): (j_tp+j_fn) / total actual positives.
+SR_n = j's share of the actual negative class (TN+FP): (j_tn+j_fp) / total actual negatives.
+SR  = √(SR_p × SR_n) — geometric mean (combined stereotypical ratio).
 SR = GR_j is the proportional reference for all three.
 """
 

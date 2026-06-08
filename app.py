@@ -37,6 +37,7 @@ from plots import (
     plot_discrimination_sweep,
     plot_histogram_grid,
     plot_histogram_grid_sr,
+    plot_histogram_grid_sr_2d,
     plot_metric_vs_sr_by_ir,
     plot_metric_vs_performance_heatmap,
     plot_probability_lines,
@@ -46,8 +47,6 @@ from plots import (
 from stereotypical_study import (
     compute_sr_sensitivity_stratified,
     metric_means_by_sr_multi_ir,
-    SR_COLUMNS,
-    SR_LABELS,
 )
 from synthetic_analysis import probability_of_nan, probability_of_perfect_fairness
 from synthetic_data import (
@@ -78,6 +77,7 @@ def _cached_metric_means_by_sr_multi_ir(
     atol: float,
 ) -> pd.DataFrame:
     return metric_means_by_sr_multi_ir(df, metric_key, list(ir_values), sr_col=sr_col, gr_value=gr_value, atol=atol)
+
 
 
 st.set_page_config(page_title="Fairness Measures Explorer", layout="wide", page_icon="⚖️")
@@ -775,20 +775,21 @@ def render_case_study_page() -> None:
 def render_stereotypical_page() -> None:
     st.header("Stereotypical bias study")
     st.write(
-        "Explore how the Stereotypical Ratio correlates with fairness metrics. "
-        "Three variants: **SR_p** (j's share of positive predictions), "
-        "**SR_n** (j's share of negative predictions), "
-        "**SR_c** = √(SR_p·SR_n) (combined). SR = GR_j is the proportional baseline."
+        "Analyse how Stereotypical Ratio (SR) shapes fairness metric distributions."
     )
 
     _prog_bar = st.empty()
     _prog_cap = st.empty()
 
-    # Map display name → (column, ratio_type string for analysis functions)
     _SR_VARIANTS: dict[str, tuple[str, str]] = {
         "SR_p": ("stereotypical_ratio", "sr"),
         "SR_n": ("stereotypical_ratio_negative", "sr_n"),
         "SR_c": ("stereotypical_ratio_combined", "sr_c"),
+    }
+    # SR_p and SR_n only — SR_c is directionally blind (rho ≈ 0 with all metrics)
+    _SR_PRIMARY_VARIANTS: dict[str, tuple[str, str]] = {
+        "SR_p": ("stereotypical_ratio", "sr"),
+        "SR_n": ("stereotypical_ratio_negative", "sr_n"),
     }
 
     with st.sidebar:
@@ -891,12 +892,12 @@ def render_stereotypical_page() -> None:
     dataset_label: str = st.session_state.get("stereo_label", "Unknown")
     available_ir = sorted(pd.unique(df["imbalance_ratio"].dropna()))
     available_gr = sorted(pd.unique(df["group_ratio_j"].dropna()))
-    # Pre-compute available values for each SR variant
-    all_avail_sr: dict[str, list[float]] = {
-        col: sorted(v for v in pd.unique(df[col]) if np.isfinite(v))
-        for col in [c for _, (c, _) in _SR_VARIANTS.items() if c in df.columns]
+    available_sr_p = sorted(v for v in pd.unique(df["stereotypical_ratio"]) if np.isfinite(v))
+    available_sr_n = sorted(v for v in pd.unique(df["stereotypical_ratio_negative"]) if np.isfinite(v))
+    all_avail_sr = {
+        "stereotypical_ratio": available_sr_p,
+        "stereotypical_ratio_negative": available_sr_n,
     }
-    available_sr_p = all_avail_sr.get("stereotypical_ratio", [])
     default_atol = 0.015 if len(available_ir) > 20 else 0.06
 
     fairness_specs = fairness_metric_specs()
@@ -906,11 +907,12 @@ def render_stereotypical_page() -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{len(df):,}")
     c2.metric("Dataset", dataset_label)
-    c3.metric("Unique SR_p values", len(available_sr_p))
-    c4.metric("Unique IR values", len(available_ir))
+    c3.metric("Unique IR values", len(available_ir))
+    c4.metric("Unique GR values", len(available_gr))
 
     tabs = st.tabs(["Histogram grids", "Metric vs SR", "Perfect fairness / NaN", "Sensitivity ranking", "Data table"])
 
+    # ---- Tab 0: 2D Histogram grids (SR × GR or SR × IR) ----
     with tabs[0]:
         st.subheader("Histogram grids")
         col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
@@ -918,38 +920,74 @@ def render_stereotypical_page() -> None:
             "Metric", options=[s.key for s in fairness_specs],
             format_func=lambda k: fairness_label_map[k], key="stereo_hist_metric",
         )
-        hist_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_hist_sr_variant")
-        bins = int(col3.number_input("Histogram bins", min_value=5, value=109, step=1, key="stereo_hist_bins"))
-        show_nan_bar = col4.checkbox("Show undefined-value bar", value=True, key="stereo_hist_nan_bar")
+        hist_sr_variant = col2.radio(
+            "SR axis (rows)", list(_SR_PRIMARY_VARIANTS), horizontal=True, key="stereo_hist_sr_variant",
+        )
+        panel_axis = col3.radio("Column axis", ["GR", "IR"], horizontal=True, key="stereo_hist_panel_axis")
+        bins = int(col4.number_input("Histogram bins", min_value=5, value=109, step=1, key="stereo_hist_bins"))
+
         hist_smoothing = smoothing_toggle(hist_metric_key, "stereo_hist_smoothing")
         hist_frn = frn_toggle(hist_metric_key, "stereo_hist_frn")
         active_hist_key = resolve_frn_key(hist_metric_key, hist_frn)
-        hist_sr_col, _ = _SR_VARIANTS[hist_sr_variant]
+        show_nan_bar = st.checkbox("Show undefined-value bar", value=True, key="stereo_hist_nan_bar")
+
+        hist_sr_col, _ = _SR_PRIMARY_VARIANTS[hist_sr_variant]
         avail_sr_hist = all_avail_sr.get(hist_sr_col, [])
+        total_n = int(df[COUNT_COLUMNS].iloc[0].sum()) if len(df) > 0 else 24
+        sr_targets = paper_ratio_defaults(total_n)
         default_sr_panel = (
-            list(dict.fromkeys(min(avail_sr_hist, key=lambda v, t=t: abs(v - t)) for t in [0.08, 0.25, 0.5, 0.75, 0.92]))
+            list(dict.fromkeys(
+                min(avail_sr_hist, key=lambda v, t=t: abs(v - t))
+                for t in sr_targets
+            ))
             if avail_sr_hist else []
         )
+        default_panel_vals = nearest_available_ratios(
+            total_n, paper_ratio_defaults(total_n),
+        ) if len(df) > 0 else []
+
         selected_sr = sorted(st.multiselect(
-            f"{hist_sr_variant} panel values", options=avail_sr_hist,
+            f"{hist_sr_variant} panel values (rows)", options=avail_sr_hist,
             default=[v for v in default_sr_panel if v in avail_sr_hist],
-            format_func=ratio_label, key=f"stereo_hist_sr_{hist_sr_variant}",
+            format_func=ratio_label, key="stereo_hist_sr_vals",
         ))
-        if selected_sr:
+        if panel_axis == "GR":
+            selected_panel = sorted(st.multiselect(
+                "GR panel values (columns)", options=available_gr,
+                default=[v for v in default_panel_vals if v in available_gr],
+                format_func=ratio_label, key="stereo_hist_gr_vals",
+            ))
+            panel_col_name, panel_label_str = "group_ratio_j", "GR"
+        else:
+            selected_panel = sorted(st.multiselect(
+                "IR panel values (columns)", options=available_ir,
+                default=[v for v in default_panel_vals if v in available_ir],
+                format_func=ratio_label, key="stereo_hist_ir_vals",
+            ))
+            panel_col_name, panel_label_str = "imbalance_ratio", "IR"
+
+        if selected_sr and selected_panel:
             hist_df = apply_smoothing_override(df, active_hist_key, hist_smoothing)
-            fig = plot_histogram_grid_sr(
+            fig = plot_histogram_grid_sr_2d(
                 hist_df, active_hist_key,
                 all_label_map.get(active_hist_key, fairness_label_map[hist_metric_key]),
-                selected_sr, sr_col=hist_sr_col, bins=bins, show_nan_bar=show_nan_bar,
+                selected_sr, selected_panel,
+                sr_col=hist_sr_col,
+                panel_col=panel_col_name,
+                panel_label=panel_label_str,
+                bins=bins,
+                show_nan_bar=show_nan_bar,
             )
             st.pyplot(fig, use_container_width=True)
             st.download_button(
                 "Download histogram grid (PNG)", data=figure_png_bytes(fig),
-                file_name=f"histogram_{hist_sr_variant}_{active_hist_key}.png", mime="image/png",
+                file_name=f"histogram_{hist_sr_variant}_{panel_label_str}_{active_hist_key}.png",
+                mime="image/png",
             )
         else:
-            st.info(f"Pick at least one {hist_sr_variant} value.")
+            st.info(f"Pick at least one {hist_sr_variant} value and one {panel_axis} value.")
 
+    # ---- Tab 1: Metric vs SR line plot ----
     with tabs[1]:
         st.subheader("Metric vs SR")
         col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
@@ -957,7 +995,9 @@ def render_stereotypical_page() -> None:
             "Metric", options=[s.key for s in fairness_specs],
             format_func=lambda k: fairness_label_map[k], key="stereo_line_metric",
         )
-        line_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_line_sr_variant")
+        line_sr_variant = col2.radio(
+            "SR variant", list(_SR_PRIMARY_VARIANTS), horizontal=True, key="stereo_line_sr_variant",
+        )
         fixed_gr = col3.selectbox(
             "Fixed GR", options=available_gr, index=len(available_gr) // 2,
             format_func=ratio_label, key="stereo_fixed_gr",
@@ -966,15 +1006,15 @@ def render_stereotypical_page() -> None:
         line_smoothing = smoothing_toggle(line_metric_key, "stereo_line_smoothing")
         line_frn = frn_toggle(line_metric_key, "stereo_line_frn")
         active_line_key = resolve_frn_key(line_metric_key, line_frn)
-        line_sr_col, _ = _SR_VARIANTS[line_sr_variant]
+        line_sr_col, _ = _SR_PRIMARY_VARIANTS[line_sr_variant]
         default_ir_lines = available_ir[:: max(1, len(available_ir) // 5)][:5]
         sweep_ir_values = sorted(st.multiselect(
-            "IR values to compare", options=available_ir,
+            "IR values to overlay", options=available_ir,
             default=[v for v in default_ir_lines if v in available_ir],
             format_func=ratio_label, key="stereo_sweep_ir",
         ))
         if not sweep_ir_values:
-            st.info("Select at least one IR value to compare.")
+            st.info("Select at least one IR value to overlay.")
         else:
             line_df = apply_smoothing_override(df, active_line_key, line_smoothing)
             multi_df = _cached_metric_means_by_sr_multi_ir(
@@ -1004,16 +1044,17 @@ def render_stereotypical_page() -> None:
                     file_name=f"metric_vs_{line_sr_variant}_{active_line_key}.csv", mime="text/csv",
                 )
 
+    # ---- Tab 2: Perfect fairness / NaN probability vs SR_p ----
     with tabs[2]:
         st.subheader("Probability of perfect fairness and undefined values")
-        col1, col2, col3, col4 = st.columns([1.4, 1, 1, 1])
+        st.caption("Sweep is over **SR_p** (the primary stereotypical ratio axis).")
+        col1, col2, col3 = st.columns([1.4, 1, 1])
         ppf_metric_keys = col1.multiselect(
             "Metrics", options=[s.key for s in fairness_specs],
             default=[s.key for s in fairness_specs], format_func=lambda k: fairness_label_map[k],
             key="stereo_ppf_metrics",
         )
-        ppf_sr_variant = col2.radio("SR variant", list(_SR_VARIANTS), horizontal=True, key="stereo_ppf_sr_variant")
-        epsilon = float(col3.number_input("Epsilon", min_value=0.0, value=0.0, step=0.001, key="stereo_ppf_eps"))
+        epsilon = float(col2.number_input("Epsilon for near-perfect fairness", min_value=0.0, value=0.0, step=0.001, key="stereo_ppf_eps"))
         ppf_smoothing = (
             st.checkbox("Haldane-Anscombe smoothing", value=True, key="stereo_ppf_smoothing")
             if any(k in _SMOOTHABLE_METRICS for k in ppf_metric_keys) else True
@@ -1023,21 +1064,20 @@ def render_stereotypical_page() -> None:
             if any(k in _FRN_KEY_MAP for k in ppf_metric_keys) else False
         )
         active_ppf_keys = apply_frn_to_keys(ppf_metric_keys, ppf_frn)
-        _, ppf_ratio_type = _SR_VARIANTS[ppf_sr_variant]
         if ppf_metric_keys:
             ppf_work = df
             for k in active_ppf_keys:
                 ppf_work = apply_smoothing_override(ppf_work, k, ppf_smoothing)
-            ppf_df = probability_of_perfect_fairness(ppf_work, active_ppf_keys, ppf_ratio_type, epsilon=epsilon)
-            nan_df = probability_of_nan(ppf_work, active_ppf_keys, ppf_ratio_type)
+            ppf_df = probability_of_perfect_fairness(ppf_work, active_ppf_keys, "sr", epsilon=epsilon)
+            nan_df = probability_of_nan(ppf_work, active_ppf_keys, "sr")
             fig1 = plot_probability_lines(
-                ppf_df, active_ppf_keys, all_label_map, ppf_ratio_type,
-                title=f"Probability of perfect fairness vs {ppf_sr_variant}",
+                ppf_df, active_ppf_keys, all_label_map, "sr",
+                title="Probability of perfect fairness vs SR_p",
                 y_label="Probability of perfect fairness", y_max=1.0,
             )
             fig2 = plot_probability_lines(
-                nan_df, active_ppf_keys, all_label_map, ppf_ratio_type,
-                title=f"Probability of undefined values vs {ppf_sr_variant}",
+                nan_df, active_ppf_keys, all_label_map, "sr",
+                title="Probability of undefined values vs SR_p",
                 y_label="Probability of undefined value", y_max=1.0,
             )
             left, right = st.columns(2)
@@ -1045,71 +1085,110 @@ def render_stereotypical_page() -> None:
             right.pyplot(fig2, use_container_width=True)
             st.download_button(
                 "Download perfect-fairness CSV", data=dataframe_csv_bytes(ppf_df),
-                file_name=f"{ppf_sr_variant}_perfect_fairness.csv", mime="text/csv",
+                file_name="sr_p_perfect_fairness.csv", mime="text/csv",
             )
             st.download_button(
                 "Download undefined-value CSV", data=dataframe_csv_bytes(nan_df),
-                file_name=f"{ppf_sr_variant}_undefined_probability.csv", mime="text/csv",
+                file_name="sr_p_undefined_probability.csv", mime="text/csv",
             )
 
+    # ---- Tab 3: Sensitivity ranking ----
     with tabs[3]:
         st.subheader("Sensitivity ranking")
         st.write(
-            "**Stratified** Spearman ρ: correlation is computed within each (IR, GR) stratum, "
-            "then combined via Fisher Z-weighting."
+            "**Stratified** Spearman ρ: computed within each (IR, GR) stratum then combined via "
+            "Fisher Z-weighting. SR_p is the primary axis. "
+            "SR_n has equal-magnitude but opposite-sign correlations to SR_p by the identity "
+            "SR_n − GR = −(SR_p − GR)·IR/(1−IR)."
         )
+
         all_fairness_keys = [s.key for s in fairness_specs]
         sens_work = df.copy()
         for k in all_fairness_keys:
             if k in _SMOOTHABLE_METRICS:
                 sens_work = apply_smoothing_override(sens_work, k, True)
 
-        sens_dfs: dict[str, pd.DataFrame] = {
-            variant: _cached_sr_sensitivity_stratified(sens_work, tuple(all_fairness_keys), col)
-            for variant, (col, _) in _SR_VARIANTS.items()
-            if col in sens_work.columns
-        }
+        # Compute SR_p and SR_n sensitivity
+        sens_sp = _cached_sr_sensitivity_stratified(sens_work, tuple(all_fairness_keys), "stereotypical_ratio")
+        sens_sn = _cached_sr_sensitivity_stratified(sens_work, tuple(all_fairness_keys), "stereotypical_ratio_negative")
 
-        any_data = any(not d.empty and not d["spearman_r"].isna().all() for d in sens_dfs.values())
-        if not any_data:
+        if sens_sp.empty or sens_sp["spearman_r"].isna().all():
             st.info("Not enough data to compute sensitivity statistics.")
         else:
-            sens_cols = st.columns(len(sens_dfs))
-            for idx, (variant, sens_df) in enumerate(sens_dfs.items()):
-                with sens_cols[idx]:
-                    st.markdown(f"**{variant}**")
-                    if sens_df.empty or sens_df["spearman_r"].isna().all():
-                        st.info("No data.")
-                    else:
-                        fig_rho = plot_sr_sensitivity(
-                            sens_df, fairness_label_map,
-                            value_col="spearman_r",
-                            title=f"Stratified ρ vs {variant}",
-                        )
-                        st.pyplot(fig_rho, use_container_width=True)
+            col_left, col_right = st.columns(2)
+            with col_left:
+                fig_sp = plot_sr_sensitivity(
+                    sens_sp, fairness_label_map,
+                    value_col="spearman_r",
+                    title="Stratified ρ(metric, SR_p)",
+                )
+                st.pyplot(fig_sp, use_container_width=True)
+            with col_right:
+                fig_sn = plot_sr_sensitivity(
+                    sens_sn, fairness_label_map,
+                    value_col="spearman_r",
+                    title="Stratified ρ(metric, SR_n)  [mirror of SR_p]",
+                )
+                st.pyplot(fig_sn, use_container_width=True)
 
-            st.subheader("Combined |ρ| table — all SR variants")
+            st.subheader("Sensitivity table — SR_p and SR_n")
             tbl_rows = []
             for key in all_fairness_keys:
                 row: dict = {"Metric": fairness_label_map.get(key, key)}
-                for variant, sens_df in sens_dfs.items():
+                for label, sens_df in [("ρ SR_p", sens_sp), ("ρ SR_n", sens_sn)]:
                     match = sens_df[sens_df["metric"] == key]
-                    rho = float(abs(match["spearman_r"].iloc[0])) if not match.empty and match["spearman_r"].notna().any() else np.nan
-                    row[f"|ρ| {variant}"] = rho
+                    rho = float(match["spearman_r"].iloc[0]) if not match.empty and match["spearman_r"].notna().any() else np.nan
+                    p_val = float(match["spearman_p"].iloc[0]) if not match.empty and match["spearman_p"].notna().any() else np.nan
+                    nan_frac = float(match["nan_fraction"].iloc[0]) if not match.empty and match["nan_fraction"].notna().any() else np.nan
+                    row[label] = rho
+                    row[f"|ρ| SR_p"] = abs(float(
+                        sens_sp[sens_sp["metric"] == key]["spearman_r"].iloc[0]
+                    )) if label == "ρ SR_p" and not sens_sp[sens_sp["metric"] == key].empty else np.nan
+                    row["p-value"] = p_val if label == "ρ SR_p" else row.get("p-value")
+                    row["NaN%"] = f"{100*nan_frac:.0f}%" if np.isfinite(nan_frac) and label == "ρ SR_p" else row.get("NaN%")
                 tbl_rows.append(row)
-            combined_tbl = pd.DataFrame(tbl_rows)
-            sort_col = next((f"|ρ| {v}" for v in _SR_VARIANTS if f"|ρ| {v}" in combined_tbl.columns), "Metric")
-            combined_tbl = combined_tbl.sort_values(sort_col, ascending=True)
-            st.dataframe(combined_tbl, use_container_width=True, hide_index=True)
+            combined_tbl = (
+                pd.DataFrame(tbl_rows)[["Metric", "ρ SR_p", "ρ SR_n", "|ρ| SR_p", "p-value", "NaN%"]]
+                .sort_values("|ρ| SR_p", ascending=False)
+                .reset_index(drop=True)
+            )
+            st.dataframe(
+                combined_tbl.style.format({
+                    "ρ SR_p": "{:+.3f}", "ρ SR_n": "{:+.3f}", "|ρ| SR_p": "{:.3f}",
+                    "p-value": lambda v: f"{v:.2e}" if isinstance(v, float) and np.isfinite(v) else "—",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
             st.caption(
-                "Most SR-resistant metric = lowest |ρ| across all three variants. "
-                "A metric is robustly resistant only if it scores low on SR_p, SR_n **and** SR_c."
+                "SR_n correlations are the algebraic mirror of SR_p (opposite sign, scaled by IR). "
+                "High |ρ| = metric is sensitive to stereotypical bias in the data. "
+                "Low |ρ| = metric is robust to SR."
             )
             st.download_button(
                 "Download sensitivity CSV", data=dataframe_csv_bytes(combined_tbl),
                 file_name="sr_sensitivity_stratified.csv", mime="text/csv",
             )
 
+            with st.expander("SR_c sensitivity (geometric mean — directionally blind)"):
+                st.write(
+                    "SR_c = √(SR_p × SR_n). Because SR_p and SR_n always deviate in opposite directions "
+                    "from GR_j, their geometric mean collapses the sign of stereotypical bias. "
+                    "At IR = 0.5, SR_c ≤ GR_j always regardless of direction. "
+                    "Consequently SR_c has near-zero stratified Spearman correlation with all fairness metrics."
+                )
+                sens_sc = _cached_sr_sensitivity_stratified(
+                    sens_work, tuple(all_fairness_keys), "stereotypical_ratio_combined"
+                )
+                if not sens_sc.empty and not sens_sc["spearman_r"].isna().all():
+                    fig_sc = plot_sr_sensitivity(
+                        sens_sc, fairness_label_map,
+                        value_col="spearman_r",
+                        title="Stratified ρ(metric, SR_c)  [near-zero throughout]",
+                    )
+                    st.pyplot(fig_sc, use_container_width=True)
+
+    # ---- Tab 4: Data table ----
     with tabs[4]:
         st.subheader("Data table")
         _render_data_table_tab(
