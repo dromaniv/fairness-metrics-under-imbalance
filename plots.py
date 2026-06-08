@@ -40,12 +40,15 @@ STYLE_OVERRIDES = {
 
 
 def ratio_label(value: float, *, max_denominator: int = 500) -> str:
-    frac = Fraction(float(value)).limit_denominator(max_denominator)
-    if abs(float(frac) - float(value)) < 1e-9 and frac.denominator != 1:
+    # Tolerance is loose enough to accept float32-quantised ratios (~1.2e-7 error)
+    # without misclassifying genuine non-ratio values.
+    fv = float(value)
+    frac = Fraction(fv).limit_denominator(max_denominator)
+    if abs(float(frac) - fv) < 1e-6 and frac.denominator != 1:
         return f"{frac.numerator}/{frac.denominator}"
-    if abs(float(value) - round(float(value))) < 1e-9:
-        return str(int(round(float(value))))
-    return f"{float(value):.2f}"
+    if abs(fv - round(fv)) < 1e-6:
+        return str(int(round(fv)))
+    return f"{fv:.2f}"
 
 
 def decimal_ratio_labels(values: Iterable[float]) -> list[str]:
@@ -505,6 +508,119 @@ def plot_histogram_grid_sr(
     return fig
 
 
+def plot_histogram_grid_sr_2d(
+    df: pd.DataFrame,
+    metric_key: str,
+    metric_label: str,
+    sr_values: list[float],
+    panel_values: list[float],
+    *,
+    sr_col: str = "stereotypical_ratio",
+    panel_col: str = "group_ratio_j",
+    panel_label: str = "GR",
+    bins: int = 109,
+    show_nan_bar: bool = True,
+) -> plt.Figure:
+    """2D histogram grid: rows = SR values, columns = secondary ratio (GR or IR).
+
+    Mirrors ``plot_histogram_grid`` but uses SR as the row axis instead of IR.
+    """
+    df = ensure_metric_column(df, metric_key)
+    sr_display = {
+        "stereotypical_ratio": "SR_p",
+        "stereotypical_ratio_negative": "SR_n",
+        "stereotypical_ratio_combined": "SR_c",
+    }.get(sr_col, "SR")
+
+    n_rows = len(sr_values)
+    n_cols = len(panel_values)
+    if n_rows == 0 or n_cols == 0:
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.text(0.5, 0.5, "No values selected", ha="center", va="center", transform=ax.transAxes)
+        fig.tight_layout()
+        return fig
+
+    sr_arr = df[sr_col].to_numpy(np.float64)
+    panel_arr = df[panel_col].to_numpy(np.float64)
+
+    if show_nan_bar:
+        mosaic = [
+            [f"r{i}c{g}{s}" for g in range(n_cols) for s in ("", "n")]
+            for i in range(n_rows)
+        ]
+        fig, axs = plt.subplot_mosaic(
+            mosaic,
+            width_ratios=[50, 1] * n_cols,
+            sharex=False,
+            sharey=True,
+            layout="constrained",
+            figsize=(4.0 * n_cols, 2.8 * n_rows),
+            gridspec_kw={"wspace": 0.1, "hspace": 0.1},
+        )
+    else:
+        fig, axs_grid = plt.subplots(
+            n_rows, n_cols,
+            sharex=False, sharey=True,
+            layout="constrained",
+            figsize=(4.0 * n_cols, 2.8 * n_rows),
+            gridspec_kw={"wspace": 0.1, "hspace": 0.1},
+        )
+        if n_rows == 1 and n_cols == 1:
+            axs_grid = np.array([[axs_grid]])
+        elif n_rows == 1:
+            axs_grid = np.array([axs_grid])
+        elif n_cols == 1:
+            axs_grid = np.array([[ax] for ax in axs_grid])
+
+    fig.suptitle(metric_label)
+
+    for i, sv in enumerate(sr_values):
+        for g, pv in enumerate(panel_values):
+            mask = (
+                np.isclose(sr_arr, float(sv), atol=1e-9, rtol=0)
+                & np.isclose(panel_arr, float(pv), atol=1e-9, rtol=0)
+            )
+            subset = df.loc[mask]
+            total = len(subset)
+
+            if show_nan_bar:
+                ax = axs[f"r{i}c{g}"]
+                ax_nan = axs[f"r{i}c{g}n"]
+            else:
+                ax = axs_grid[i, g]
+                ax_nan = None
+
+            if total == 0:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            else:
+                values = subset[metric_key]
+                finite_values = values[np.isfinite(values)]
+                nan_prob = float(values.isna().mean())
+                if len(finite_values) > 0:
+                    binned, edges = np.histogram(finite_values, bins=bins)
+                    binned = binned / total
+                    ax.hist(edges[:-1], edges, weights=binned, fc="black", ec="black")
+                else:
+                    ax.text(0.5, 0.5, "All values undefined", ha="center", va="center", transform=ax.transAxes)
+                if ax_nan is not None:
+                    ax_nan.bar(0, nan_prob, fc="red", ec="red", width=0.1, lw=0)
+                    ax_nan.spines[["top", "left"]].set_visible(False)
+                    if i == n_rows - 1:
+                        ax_nan.set_xticks([0], ["Undef."])
+                    else:
+                        ax_nan.set_xticks([0], [""])
+
+            ax.spines[["top", "right"]].set_visible(False)
+            if g == 0:
+                ax.set_ylabel(f"{sr_display} = {ratio_label(sv)}")
+            if i == 0:
+                ax.set_title(f"{panel_label} = {ratio_label(pv)}")
+            if i != n_rows - 1:
+                ax.set_xticklabels([])
+
+    return fig
+
+
 def plot_discrimination_sweep(
     df: pd.DataFrame,
     metric_keys: list[str],
@@ -686,5 +802,7 @@ def plot_metric_vs_sr_by_ir(
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig
+
+
 
 
