@@ -1468,7 +1468,7 @@ def render_metric_registry_page() -> None:
 
 st.title("Fairness Measures Explorer")
 st.caption(
-    "Interactive Streamlit recreation of the synthetic analyses and Adult case study from the provided fairness-measure repository."
+    "Interactive Streamlit recreation of the synthetic analyses and Adult case study, including a new stereotypical workflow."
 )
 
 page = st.radio(

@@ -239,7 +239,7 @@ def register_builtin_metrics() -> None:
             key="group_ratio_j",
             label="Group Ratio (j / total)",
             category="ratio",
-            description="Group ratio following the provided repository implementation: j-group count divided by total count.",
+            description="Group ratio: j-group count divided by total count.",
             formula="(j_tp + j_fp + j_tn + j_fn) / total",
             compute=group_ratio_j,
         ),

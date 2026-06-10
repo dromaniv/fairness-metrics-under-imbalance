@@ -1,7 +1,5 @@
 # Fairness Measures Explorer
 
-A modular Streamlit recreation of the provided fairness-measure repository.
-
 The app covers two workflows:
 
 1. **Synthetic study**
